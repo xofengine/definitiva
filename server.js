@@ -1,4 +1,5 @@
-﻿// server.js (Arancel JSON permanente + Listado/EXPO + fixes de /arancel/data)
+// server.js — Express listo para Vercel (lectura/escritura segura y export del handler)
+
 const express = require("express");
 const path = require("path");
 const fs = require("fs");
@@ -10,88 +11,113 @@ const { PDFDocument } = require("pdf-lib");
 const http = require("http");
 const { DateTime } = require("luxon");
 
-const app = express();
+// ====== Entorno ======
+const IS_VERCEL = !!process.env.VERCEL;
+const IS_PROD = process.env.NODE_ENV === "production" || IS_VERCEL;
 const TZ = "America/Santiago";
 
-// ------------------ App & estáticos ------------------
+// ====== App base ======
+const app = express();
 app.set("view engine", "ejs");
 app.set("views", path.join(__dirname, "views"));
+app.locals.basedir = app.get("views");
+
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 app.use(compression());
+
 app.use("/static", express.static(path.join(__dirname, "public")));
-app.use("/uploads", express.static(path.join(__dirname, "uploads")));
 app.use((req, res, next) => { res.locals.path = req.path || "/"; next(); });
-app.locals.basedir = app.get("views");
 
-// Alias opcional para compat de CSS
-app.get("/static/css/styles.css", (req, res) => {
-  const p1 = path.join(__dirname, "public", "css", "styles.css");
-  const p2 = path.join(__dirname, "public", "styles.css");
-  if (fs.existsSync(p1)) return res.sendFile(p1);
-  if (fs.existsSync(p2)) return res.sendFile(p2);
-  return res.status(404).send("styles.css no encontrado");
-});
+// ====== Paths de datos/subidas (seguros en Vercel) ======
+const DATA_DIR = IS_VERCEL ? "/tmp/data"    : path.join(__dirname, "data");
+const UP_DIR   = IS_VERCEL ? "/tmp/uploads" : path.join(__dirname, "uploads");
 
-// ------------------ Logger simple ------------------
+try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch {}
+try { fs.mkdirSync(UP_DIR,   { recursive: true }); } catch {}
+
+// Sirve /uploads desde la carpeta correcta (incluye /tmp en prod)
+app.use("/uploads", express.static(UP_DIR));
+
+// ====== Logger simple ======
 app.use((req, res, next) => {
   const t0 = Date.now();
-  console.log(`[REQ] ${req.method} ${req.originalUrl}  Accept=${req.get("accept") || ""}`);
-  const oldJson = res.json.bind(res);
-  const oldSend = res.send.bind(res);
-  res.json = (body) => { console.log(`[RES] ${req.method} ${req.originalUrl} -> JSON ${res.statusCode}`); return oldJson(body); };
-  res.send = (body)  => { console.log(`[RES] ${req.method} ${req.originalUrl} -> SEND ${res.statusCode}`); return oldSend(body); };
-  res.on("finish", () => console.log(`[END] ${req.method} ${req.originalUrl}  ${res.statusCode}  ${Date.now()-t0}ms`));
+  console.log(`[REQ] ${req.method} ${req.originalUrl}`);
+  res.on("finish", () => console.log(`[END] ${req.method} ${req.originalUrl} ${res.statusCode} ${Date.now()-t0}ms`));
   next();
 });
 
-// ------------------ Salud/Debug ------------------
-app.get("/_debug/ping", (req, res) => res.json({ ok: true, ts: Date.now() }));
-app.get("/favicon.ico", (req, res) => res.status(404).end());
+// ====== Salud/Debug ======
+app.get("/_debug/ping", (req, res) => res.json({ ok: true, ts: Date.now(), vercel: IS_VERCEL }));
 
-// ------------------ Carpetas y almacenamiento ------------------
-const DATA_DIR = path.join(__dirname, "data");
-const UP_DIR   = path.join(__dirname, "uploads");
-if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-if (!fs.existsSync(UP_DIR))   fs.mkdirSync(UP_DIR,   { recursive: true });
+// ====== Helpers ======
+const readJSON  = (p, fb) => { try { return JSON.parse(fs.readFileSync(p, "utf8")); } catch { return fb; } };
+const writeJSON = (p, obj) => { try { fs.writeFileSync(p, JSON.stringify(obj, null, 2), "utf8"); } catch (e) { console.warn("writeJSON fail:", e.message); } };
+const wantsJSON = (req) => (req.get("accept")||"").includes("json") || req.xhr;
 
-// ------------------ Archivos base ------------------
+function parseCLDate(str) {
+  if (!str) return null;
+  if (str instanceof Date) return Number.isNaN(str.getTime()) ? null : str;
+  const s = String(str).trim();
+  const d0 = new Date(s);
+  if (!Number.isNaN(d0.getTime())) return d0;
+  let m = s.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})(?:\s+(\d{1,2}):(\d{2}))?$/);
+  if (m) {
+    const dd=+m[1], mm=+m[2]-1, yyyy=+m[3], HH=m[4]?+m[4]:0, MM=m[5]?+m[5]:0;
+    const d = new Date(yyyy, mm, dd, HH, MM, 0, 0);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+  m = s.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{2})$/);
+  if (m) {
+    const dd=+m[1], mm=+m[2]-1, yy=+m[3], yyyy = yy + (yy >= 70 ? 1900 : 2000);
+    const d = new Date(yyyy, mm, dd);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+  return null;
+}
+function fmtDMY(dLike) {
+  const d = (dLike instanceof Date) ? dLike : parseCLDate(dLike);
+  if (!d) return "";
+  const dd = String(d.getDate()).padStart(2,"0");
+  const mm = String(d.getMonth()+1).padStart(2,"0");
+  const yy = d.getFullYear();
+  return `${dd}-${mm}-${yy}`;
+}
+function isTodayTS(ts) {
+  if (!ts && ts !== 0) return false;
+  const d = DateTime.fromMillis(Number(ts), { zone: TZ });
+  const now = DateTime.now().setZone(TZ);
+  return d.isValid && d.hasSame(now, "day") && d.hasSame(now, "month") && d.hasSame(now, "year");
+}
+function unique(values) {
+  return Array.from(new Set(values.filter(Boolean)))
+    .sort((a, b) => String(a).localeCompare(String(b), "es"));
+}
+function toISOFromFechaHora(fechaYMD, horaHMS) {
+  const f = (fechaYMD || "").trim();
+  const h = (horaHMS || "").trim() || "00:00:00";
+  if (!f) return "";
+  const dt = DateTime.fromFormat(`${f} ${h}`, "yyyy-LL-dd HH:mm:ss", { zone: TZ });
+  return dt.isValid ? dt.toISO() : "";
+}
+const normTxt = s => String(s||"").toUpperCase().replace(/[.,]/g,"").replace(/\s+/g," ").trim();
+
+// ====== Archivos base ======
 const ARANCEL_FILE       = path.join(DATA_DIR, "arancel.json");
 const ALT_ARANCEL_FILE_1 = path.join(DATA_DIR, "arancel_aduanero_2022_version_publicada_sitio_web.json");
 
-// Si no existe arancel.json, intenta copiar del JSON largo que subiste
 if (!fs.existsSync(ARANCEL_FILE)) {
   if (fs.existsSync(ALT_ARANCEL_FILE_1)) {
-    try {
-      const raw = fs.readFileSync(ALT_ARANCEL_FILE_1, "utf8");
-      fs.writeFileSync(ARANCEL_FILE, raw, "utf8");
-      console.log("⚙ Copiado arancel desde", path.basename(ALT_ARANCEL_FILE_1));
-    } catch (e) {
-      console.warn("⚠ No se pudo copiar JSON de arancel:", e.message);
-      fs.writeFileSync(ARANCEL_FILE, JSON.stringify({ headers: [], rows: [] }, null, 2), "utf8");
-    }
+    try { fs.writeFileSync(ARANCEL_FILE, fs.readFileSync(ALT_ARANCEL_FILE_1, "utf8"), "utf8"); }
+    catch (e) { writeJSON(ARANCEL_FILE, { headers: [], rows: [] }); }
   } else {
-    fs.writeFileSync(ARANCEL_FILE, JSON.stringify({ headers: [], rows: [] }, null, 2), "utf8");
+    writeJSON(ARANCEL_FILE, { headers: [], rows: [] });
   }
 }
 
-// ------------------ Multer ------------------
-const storage = multer.diskStorage({
-  destination: (_, __, cb) => cb(null, UP_DIR),
-  filename:   (_, file, cb) => {
-    const safe = (file.originalname || "archivo").replace(/[^a-zA-Z0-9._-]/g, "_");
-    cb(null, `${Date.now()}-${safe}`);
-  }
-});
-const upload = multer({ storage });
-
-// ------------------ Otros archivos persistentes ------------------
 const STATE_FILE = path.join(DATA_DIR, "state.json");
 const CACHE_FILE = path.join(DATA_DIR, "cache.json");
 const CONTROL_EXPO_FILE = path.join(DATA_DIR, "control_expo.json");
-
-const readJSON  = (p, fb) => { try { return JSON.parse(fs.readFileSync(p, "utf8")); } catch { return fb; } };
-const writeJSON = (p, obj) => fs.writeFileSync(p, JSON.stringify(obj, null, 2), "utf8");
 
 if (!fs.existsSync(STATE_FILE)) writeJSON(STATE_FILE, {
   extra: {}, pdfs: {}, pdfsMeta: {}, respaldos: {}, retiros: {}, assigned: {},
@@ -101,80 +127,49 @@ if (!fs.existsSync(STATE_FILE)) writeJSON(STATE_FILE, {
 if (!fs.existsSync(CACHE_FILE)) writeJSON(CACHE_FILE, { rows: [], mtime: null });
 if (!fs.existsSync(CONTROL_EXPO_FILE)) writeJSON(CONTROL_EXPO_FILE, []);
 
-// ------------------ Utilidades varias ------------------
-function wantsJSON(req) {
-  const a = (req.get("accept") || "").toLowerCase();
-  return a.includes("application/json") || a.includes("text/json") || req.xhr;
-}
-function isTodayTS(ts) {
-  if (!ts && ts !== 0) return false;
-  const d = DateTime.fromMillis(Number(ts), { zone: TZ });
-  const now = DateTime.now().setZone(TZ);
-  return d.isValid && d.hasSame(now, "day") && d.hasSame(now, "month") && d.hasSame(now, "year");
-}
-function parseCLDate(str) {
-  if (!str) return null;
-  if (str instanceof Date) return Number.isNaN(str.getTime()) ? null : str;
-  const s = String(str).trim();
-  const d0 = new Date(s);
-  if (!Number.isNaN(d0.getTime())) return d0;
-  let m = s.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})(?:\s+(\d{1,2}):(\d{2}))?$/);
-  if (m) {
-    const dd = +m[1], mm = +m[2]-1, yyyy = +m[3];
-    const HH = m[4] ? +m[4] : 0, MM = m[5] ? +m[5] : 0;
-    const d = new Date(yyyy, mm, dd, HH, MM, 0, 0);
-    return Number.isNaN(d.getTime()) ? null : d;
+// ====== Multer (a UP_DIR) ======
+const storage = multer.diskStorage({
+  destination: (_, __, cb) => cb(null, UP_DIR),
+  filename:   (_, file, cb) => {
+    const safe = (file.originalname || "archivo").replace(/[^a-zA-Z0-9._-]/g, "_");
+    cb(null, `${Date.now()}-${safe}`);
   }
-  m = s.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{2})$/);
-  if (m) {
-    const dd = +m[1], mm = +m[2]-1, yy = +m[3];
-    const yyyy = yy + (yy >= 70 ? 1900 : 2000);
-    const d = new Date(yyyy, mm, dd);
-    return Number.isNaN(d.getTime()) ? null : d;
-  }
-  return null;
+});
+const upload = multer({ storage });
+
+// ====== Arancel utils ======
+function loadArancel() {
+  try {
+    const raw = JSON.parse(fs.readFileSync(ARANCEL_FILE, "utf8"));
+    if (raw && Array.isArray(raw.headers) && Array.isArray(raw.rows)) return raw;
+    if (Array.isArray(raw)) return { headers: [], rows: raw };
+    if (raw && Array.isArray(raw.data)) return { headers: raw.headers || [], rows: raw.data };
+    return { headers: [], rows: [] };
+  } catch { return { headers: [], rows: [] }; }
 }
-function fmtDMY(strOrDate) {
-  const d = (strOrDate instanceof Date) ? strOrDate : parseCLDate(strOrDate);
-  if (!d) return "";
-  const dd = String(d.getDate()).padStart(2,"0");
-  const mm = String(d.getMonth()+1).padStart(2,"0");
-  const yy = d.getFullYear();
-  return `${dd}-${mm}-${yy}`;
-}
-function unique(values) {
-  return Array.from(new Set(values.filter(Boolean)))
-    .sort((a, b) => String(a).localeCompare(String(b), "es"));
-}
-function joinDateTimeStr(dateStr, timeStr) {
-  const d = parseCLDate(dateStr);
-  if (!d) return null;
-  if (timeStr) {
-    const m = String(timeStr).trim().match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
-    if (m) d.setHours(+m[1], +m[2], m[3] ? +m[3] : 0, 0);
-  }
+const hsDigits = (s)=> String(s ?? "").replace(/\D/g,"");
+const looksLikeHSAny = (v)=>{ const d=hsDigits(v); return d.length>=2 && d.length<=8; };
+const formatHS = (raw)=>{
+  const d = hsDigits(raw); if(!d) return "";
+  if(d.length===8) return `${d.slice(0,4)}.${d.slice(4)}`;
+  if(d.length===6) return `${d.slice(0,4)}.${d.slice(4)}`;
+  if(d.length===4) return `${d.slice(0,2)}.${d.slice(2)}`;
   return d;
-}
-function toISOFromFechaHora(fechaYMD, horaHMS) {
-  const f = (fechaYMD || "").trim();
-  const h = (horaHMS || "").trim() || "00:00:00";
-  if (!f) return "";
-  const dt = DateTime.fromFormat(`${f} ${h}`, "yyyy-LL-dd HH:mm:ss", { zone: TZ });
-  return dt.isValid ? dt.toISO() : "";
-}
+};
+const findCodeInRow = (row)=> (Array.isArray(row)?row:[]).find(v=>looksLikeHSAny(v)) ? formatHS((Array.isArray(row)?row:[]).find(v=>looksLikeHSAny(v))) : "";
+const pickGlosaInRow = (row, headers)=>{
+  const arr = Array.isArray(row)?row:[]; const h = Array.isArray(headers)?headers:[];
+  const gIdx = h.findIndex(t => /(glosa|descrip)/i.test(String(t)));
+  if(gIdx>=0 && String(arr[gIdx]||"").trim()) return String(arr[gIdx]);
+  for(const v of arr){ if(!looksLikeHSAny(v) && String(v||"").trim()) return String(v); }
+  return "";
+};
 
-// --- State helpers ---
-function pruneAssigned(st) {
-  st.assigned = st.assigned || {};
-  for (const [ped, arr] of Object.entries(st.assigned)) {
-    st.assigned[ped] = (arr || []).filter(x => isTodayTS((typeof x === "object") ? x.ts : null));
-  }
-}
-function loadState()  { const st = readJSON(STATE_FILE, { extra: {} }); if (!Array.isArray(st.autoAssignedLog)) st.autoAssignedLog = []; pruneAssigned(st); return st; }
-function saveState(st) { pruneAssigned(st); writeJSON(STATE_FILE, st); }
-function loadCache()  { return readJSON(CACHE_FILE, { rows: [], mtime: null }); }
+// ====== State helpers ======
+const loadState = ()=> readJSON(STATE_FILE, { extra: {} });
+const saveState = (st)=> writeJSON(STATE_FILE, st);
+const loadCache  = ()=> readJSON(CACHE_FILE, { rows: [], mtime: null });
 
-// --- Flujo badges & merged ---
 function getStatusFor(despacho, st) {
   const d = String(despacho);
   const has = (arr) => Array.isArray(arr) && arr.some(x => String(x.despacho) === d);
@@ -186,12 +181,7 @@ function getStatusFor(despacho, st) {
   if (has(st.presentado)) return { key: "presentado", label: "Presentado",   cls: "dark" };
   return { key: "", label: "—", cls: "light" };
 }
-function loadControlExpo() { return readJSON(CONTROL_EXPO_FILE, []); }
-function saveControlExpo(rows) { writeJSON(CONTROL_EXPO_FILE, rows || []); }
-function pickCliente(despacho) {
-  const it = mergedRows().find(r => String(r.DESPACHO) === String(despacho));
-  return it ? (it.CLIENTE_NOMBRE || "") : "";
-}
+
 function mergedRows() {
   const cache = loadCache();
   const st = loadState();
@@ -235,46 +225,16 @@ function mergedRows() {
   return rows;
 }
 
-// ==================== ARANCEL (JSON permanente) ====================
-function loadArancel() {
-  try {
-    const raw = JSON.parse(fs.readFileSync(ARANCEL_FILE, "utf8"));
-    if (raw && Array.isArray(raw.headers) && Array.isArray(raw.rows)) return raw;
-    if (Array.isArray(raw)) return { headers: [], rows: raw };
-    if (raw && Array.isArray(raw.data)) return { headers: raw.headers || [], rows: raw.data };
-    return { headers: [], rows: [] };
-  } catch (e) {
-    console.warn("[ARANCEL] No se pudo leer/parsing ARANCEL_FILE:", e.message);
-    return { headers: [], rows: [] };
-  }
-}
-function saveArancel(d) { fs.writeFileSync(ARANCEL_FILE, JSON.stringify(d, null, 2), "utf8"); }
+// ====== Vistas ======
+app.get("/static/css/styles.css", (req, res) => {
+  const p1 = path.join(__dirname, "public", "css", "styles.css");
+  const p2 = path.join(__dirname, "public", "styles.css");
+  if (fs.existsSync(p1)) return res.sendFile(p1);
+  if (fs.existsSync(p2)) return res.sendFile(p2);
+  return res.status(404).send("styles.css no encontrado");
+});
 
-// --- Helpers robustos para el HS ---
-function hsDigits(s){ return String(s ?? "").replace(/\D/g,""); }
-function looksLikeHSAny(v){ const d=hsDigits(v); return d.length>=2 && d.length<=8; }
-function formatHS(raw){
-  const d = hsDigits(raw); if(!d) return "";
-  if(d.length===8) return `${d.slice(0,4)}.${d.slice(4)}`; // 8471.1100
-  if(d.length===6) return `${d.slice(0,4)}.${d.slice(4)}`; // 8471.11
-  if(d.length===4) return `${d.slice(0,2)}.${d.slice(2)}`; // 84.71
-  return d;
-}
-function findCodeInRow(row){
-  const arr = Array.isArray(row) ? row : [];
-  for(const v of arr){ if(looksLikeHSAny(v)) return formatHS(v); }
-  return "";
-}
-function pickGlosaInRow(row, headers){
-  const arr = Array.isArray(row) ? row : [];
-  const h   = Array.isArray(headers) ? headers : [];
-  const gIdx = h.findIndex(t => /(glosa|descrip)/i.test(String(t)));
-  if(gIdx>=0 && String(arr[gIdx]||"").trim()) return String(arr[gIdx]);
-  for(const v of arr){ if(!looksLikeHSAny(v) && String(v||"").trim()) return String(v); }
-  return "";
-}
-
-// Página principal Arancel
+// ---- Arancel
 app.get("/arancel", (req, res) => {
   const data = loadArancel();
   const hasData = (data.headers || []).length && (data.rows || []).length;
@@ -287,7 +247,6 @@ app.get("/arancel", (req, res) => {
   });
 });
 
-// API robusta: lista filtrada con búsqueda por PREFIJO de partida (en cualquier columna)
 app.all("/arancel/data", (req, res) => {
   try {
     const q     = String(req.query.q ?? "").trim();
@@ -300,26 +259,21 @@ app.all("/arancel/data", (req, res) => {
     const headers = Array.isArray(data.headers) ? data.headers : [];
     const rowsAll = Array.isArray(data.rows)    ? data.rows    : [];
 
-    // normaliza a objetos {code, glosa}
     let items = rowsAll.map(row => ({ code: findCodeInRow(row), glosa: pickGlosaInRow(row, headers) }));
-
     const qDigits = hsDigits(q);
     const qText   = desc.toUpperCase();
 
-    // filtro (prefijo de partida + texto glosa)
     items = items.filter(({code, glosa}) => {
       const okPart = qDigits ? hsDigits(code).startsWith(qDigits) : true;
       const okDesc = qText ? String(glosa).toUpperCase().includes(qText) : true;
       return okPart && okDesc && (!qDigits || !!code);
     });
 
-    // orden por código
     items.sort((a,b) => {
       const A = hsDigits(a.code), B = hsDigits(b.code);
       return sort === "desc" ? B.localeCompare(A,"es") : A.localeCompare(B,"es");
     });
 
-    // paginación
     const total = items.length;
     const totalPages = Math.max(1, Math.ceil(total/per));
     const pageItems = items.slice((page-1)*per, (page-1)*per + per);
@@ -337,7 +291,7 @@ app.all("/arancel/data", (req, res) => {
   }
 });
 
-// ------------------ Home (Listado) ------------------
+// ---- Home (Listado)
 app.get("/", (req, res) => {
   const rowsAll = mergedRows();
   const q = (req.query.q || "").toLowerCase();
@@ -381,7 +335,11 @@ app.get("/", (req, res) => {
   });
 });
 
-// ------------------ Flujo ------------------
+// ---- Flujo
+function pickCliente(despacho) {
+  const it = mergedRows().find(r => String(r.DESPACHO) === String(despacho));
+  return it ? (it.CLIENTE_NOMBRE || "") : "";
+}
 app.get("/inicio", (req, res) => {
   const st = loadState();
   const aprobadosSet = new Set((st.aprobado || []).map(x => String(x.despacho)));
@@ -417,7 +375,6 @@ app.get("/inicio", (req, res) => {
   });
 });
 
-// avanzar estado
 function doAdvance(st, section, despacho) {
   const advance = (fromArrName, toArrName) => {
     const fromArr = st[fromArrName] || [];
@@ -448,19 +405,12 @@ app.all("/flujo/advance/:section/:despacho", (req, res) => {
   if (req.method === "GET" && !wantsJSON(req)) return res.redirect("/inicio");
   return res.json({ ok: true });
 });
-
 app.all("/flujo/clear-aprobados", (req, res) => {
-  const st = loadState();
-  st.aprobado = [];
-  st.mtime = Date.now();
-  saveState(st);
+  const st = loadState(); st.aprobado = []; st.mtime = Date.now(); saveState(st);
   return wantsJSON(req) ? res.json({ ok:true }) : res.redirect("/inicio");
 });
 app.all("/flujo/clear-assigned", (req, res) => {
-  const st = loadState();
-  st.assigned = {};
-  st.mtime = Date.now();
-  saveState(st);
+  const st = loadState(); st.assigned = {}; st.mtime = Date.now(); saveState(st);
   return wantsJSON(req) ? res.json({ ok:true }) : res.redirect("/inicio");
 });
 app.post("/flujo/remove/:section/:despacho", (req, res) => {
@@ -472,8 +422,6 @@ app.post("/flujo/remove/:section/:despacho", (req, res) => {
   st.mtime = Date.now(); saveState(st);
   res.json({ ok:true });
 });
-
-// ------------------ Enviar a revisión (desde Listado) ------------------
 app.post("/revision", (req, res) => {
   const { despacho } = req.body || {};
   if (!despacho) return res.status(400).json({ ok: false, msg: "despacho requerido" });
@@ -484,31 +432,23 @@ app.post("/revision", (req, res) => {
   st.mtime = Date.now(); saveState(st);
   return res.json({ ok: true });
 });
-
-// ------------------ Asignar pedidor manual ------------------
 app.post("/asignar/:despacho", (req, res) => {
   const { despacho } = req.params;
   const { pedidor } = req.body || {};
   if (!pedidor) return res.status(400).json({ ok: false, msg: "pedidor requerido" });
-
   const st = loadState();
   const isApproved = (st.aprobado || []).some(x => String(x.despacho) === String(despacho));
   if (isApproved) return res.status(409).json({ ok:false, msg:"Despacho aprobado—no asignable" });
-
   st.extra[despacho] = st.extra[despacho] || {};
   st.extra[despacho].pedidor = pedidor;
-
   st.assigned = st.assigned || {};
   st.assigned[pedidor] = st.assigned[pedidor] || [];
   const ts = Date.now();
   const exists = st.assigned[pedidor].some(x => (typeof x === "object" ? x.despacho : x) === despacho);
   if (!exists) st.assigned[pedidor].push({ despacho, ts });
-
   st.mtime = Date.now(); saveState(st);
   res.json({ ok: true });
 });
-
-// ------------------ Modal data ------------------
 app.get("/modal-data/:despacho", (req, res) => {
   const D = String(req.params.despacho);
   const st = loadState();
@@ -523,7 +463,7 @@ app.get("/modal-data/:despacho", (req, res) => {
   res.json({ ok: true, data: payload });
 });
 
-// ====== APLICACIÓN: subir/merge PDFs ======
+// ---- Aplicación: merge PDFs
 app.get("/aplicacion", (req, res) => {
   res.render("aplicacion", { merged: (req.query.merged || "").trim(), error: (req.query.error || "").trim() });
 });
@@ -549,7 +489,7 @@ app.post("/aplicacion/merge", upload.array("pdfs", 30), async (req, res) => {
   }
 });
 
-// ---------- Update docs/carga/respaldos/gastos/resumen ----------
+// ---- Update extras / uploads puntuales
 app.post("/update/:despacho", (req, res) => {
   const D = String(req.params.despacho);
   const st = loadState();
@@ -597,7 +537,7 @@ app.post("/resumen/save/:despacho", (req, res) => {
   st.mtime = Date.now(); saveState(st); res.json({ ok: true });
 });
 
-// ------------------ PDFs por despacho ------------------
+// ---- PDFs por despacho
 app.post("/upload/:despacho", upload.single("pdf"), (req, res) => {
   const { despacho } = req.params;
   const st = loadState();
@@ -620,12 +560,18 @@ app.all("/pdf/delete/:despacho", (req, res) => {
     const st = loadState();
     const rel = (st.pdfs || {})[d];
     if (rel) {
-      try { const abs = path.join(__dirname, rel.replace(/^\//, "")); if (fs.existsSync(abs)) fs.unlinkSync(abs); }
-      catch (e) { console.warn("[SERVER] No se pudo borrar físicamente:", e.message); }
+      try {
+        let abs;
+        if (rel.startsWith("/uploads/")) {
+          abs = path.join(UP_DIR, path.basename(rel));
+        } else {
+          abs = path.join(__dirname, rel.replace(/^\//, ""));
+        }
+        if (fs.existsSync(abs)) fs.unlinkSync(abs);
+      } catch (e) { console.warn("[SERVER] No se pudo borrar físicamente:", e.message); }
       delete st.pdfs[d]; st.mtime = Date.now(); saveState(st);
     }
-    if (req.method === "POST") return res.json({ ok: true });
-    if (wantsJSON(req)) return res.json({ ok: true });
+    if (req.method === "POST" || wantsJSON(req)) return res.json({ ok: true });
     const back = req.get("referer") || "/?page=1"; return res.redirect(back);
   } catch (e) {
     console.error("❌ /pdf/delete error:", e);
@@ -634,7 +580,7 @@ app.all("/pdf/delete/:despacho", (req, res) => {
   }
 });
 
-// ------------------ Cargados ------------------
+// ---- Cargados
 app.get("/cargados", (req, res) => {
   try {
     const q = (req.query.q || "").trim().toLowerCase();
@@ -728,15 +674,13 @@ app.get("/cargados", (req, res) => {
   }
 });
 
-// ------------------ Provisión ------------------
+// ---- Provisión
 const PROVISION_CLIENTS = [
   "HISENSE","EECOL","PERFECT TECHNOLOGY","ICON","PUREFRUIT","COMERCIAL CYR",
   "COM. E INDUSTRIAL STROLLER SPA","TRANSP.Y COM. TRESSA","CANONTEX LIMITAD",
   "TEKA CHILE S.A","TECNICA THOMAS C SARGENT S A","SEVEN PHARMA CHILE"
 ];
-const normTxt = s => String(s||"").toUpperCase().replace(/[.,]/g,"").replace(/\s+/g," ").trim();
 const isProvisionClient = c => PROVISION_CLIENTS.some(tag => normTxt(c||"").includes(normTxt(tag)));
-
 app.get("/provision", (req, res) => {
   const q = (req.query.q || "").toLowerCase().trim();
   const from = req.query.from || "";
@@ -761,15 +705,16 @@ app.get("/provision", (req, res) => {
   res.render("provision", { q, from, to, rows: view });
 });
 
-// ========================= CONTROL EXPO (independiente) =========================
+// ====== CONTROL EXPO ======
+const loadControlExpo = ()=> readJSON(CONTROL_EXPO_FILE, []);
+const saveControlExpo = (rows)=> writeJSON(CONTROL_EXPO_FILE, rows || []);
+
 function toISODateOnly(s) {
-  const d = parseCLDate(s);
-  if (!d) return "";
+  const d = parseCLDate(s); if (!d) return "";
   const y = d.getFullYear(), m = String(d.getMonth()+1).padStart(2,'0'), dd = String(d.getDate()).padStart(2,'0');
   return `${y}-${m}-${dd}`;
 }
 function fmtDMYsafe(s) { const d = parseCLDate(s); return d ? fmtDMY(d) : ""; }
-function loadControlExpoFast() { return loadControlExpo(); }
 function buildListadoIndex() {
   const rows = mergedRows();
   const byDesp = new Map();
@@ -805,7 +750,6 @@ function isExpoXML(parsed) {
   return hasAnyKeyDeep(parsed, expoKeys);
 }
 
-// Upload XML EXPO (guarda SOLO en control_expo.json)
 app.post("/control-expo/upload-xml", upload.single("xml"), async (req, res) => {
   try {
     if (!req.file) return res.redirect("/control-expo?err=No+se+recibio+XML");
@@ -859,7 +803,7 @@ app.post("/control-expo/upload-xml", upload.single("xml"), async (req, res) => {
   }
 });
 
-// Dispatcher /upload-xml (EXPO o Listado)
+// Dispatcher: /upload-xml (EXPO o Listado)
 app.post("/upload-xml", upload.single("xml"), async (req, res) => {
   try {
     if (!req.file) return res.status(400).send("Debes subir un XML");
@@ -871,61 +815,27 @@ app.post("/upload-xml", upload.single("xml"), async (req, res) => {
     const forceListado = tipo === "listado";
 
     if (forceExpo || (!forceListado && isExpoXML(parsed))) {
-      const list =
-        parsed?.ROWS?.ROW ? (Array.isArray(parsed.ROWS.ROW) ? parsed.ROWS.ROW : [parsed.ROWS.ROW]) :
-        parsed?.Listado?.Registro ? (Array.isArray(parsed.Listado.Registro) ? parsed.Listado.Registro : [parsed.Listado.Registro]) :
-        parsed?.ROW ? (Array.isArray(parsed.ROW) ? parsed.ROW : [parsed.ROW]) :
-        Array.isArray(parsed) ? parsed : [];
-
-      const rows = list.map(x => {
-        const DESPACHO = String(x.DESPACHO || x.N_DOC || x.NRO_DOC || x.ID || x.Id || "").trim();
-        const CLIENTE  = String(x.CLIENTE || x.CLIENTE_NOMBRE || x.RAZON_SOCIAL || x.NOMBRE_CLIENTE || "").trim();
-        const DUS      = String(x.DUS || x.N_DUS || x.NUM_DUS || x.NUMERO_DUS || x.DUS_NUMERO || "").trim();
-
-        const A1_RAW = x.FECHA_ACEPTACION_DUS_1 || x.FECHA_ACEPTACION || x.FEC_ACEPTA_1 || "";
-        const A2_RAW = x.FECHA_ACEPTACION_DUS_2 || x.FECHA_LEGALIZACION || x.FEC_ACEPTA_2 || "";
-        const VTO_RAW= x.FECHA_VENCIMIENTO_DUS   || x.DUS_VENCIMIENTO || x.FECHA_VENCIMIENTO || x.VENCIMIENTO_DUS || x.VTO || "";
-
-        const A1_ISO = toISODateOnly(A1_RAW);
-        const A2_ISO = toISODateOnly(A2_RAW);
-        const VTO_ISO= toISODateOnly(VTO_RAW);
-
-        const A1_TIME = parseCLDate(A1_ISO)?.getTime() ?? null;
-        const A2_TIME = parseCLDate(A2_ISO)?.getTime() ?? null;
-        const VTO_TIME= parseCLDate(VTO_ISO)?.getTime() ?? null;
-
-        return {
-          DESPACHO, CLIENTE, DUS,
-          ACEPTA1_RAW: A1_RAW, ACEPTA1_ISO: A1_ISO, ACEPTA1_FMT: fmtDMYsafe(A1_ISO), ACEPTA1_TIME: A1_TIME,
-          ACEPTA2_RAW: A2_RAW, ACEPTA2_ISO: A2_ISO, ACEPTA2_FMT: fmtDMYsafe(A2_ISO), ACEPTA2_TIME: A2_TIME,
-          DUS_VENCIMIENTO_RAW: VTO_RAW,
-          DUS_VENCIMIENTO_ISO: VTO_ISO,
-          DUS_VENCIMIENTO_FMT: fmtDMYsafe(VTO_ISO),
-          DUS_VENCIMIENTO_TIME: VTO_TIME,
-          PRORROGAS: String(x.PRORROGAS || x.PRORROGA || x.NRO_PRORROGA || "").trim()
-        };
-      }).filter(r => r.DESPACHO);
-
-      saveControlExpo(rows);
-      return res.redirect("/control-expo?ok=XML+cargado+por+/upload-xml");
+      // Reutiliza la lógica de EXPO arriba:
+      const tmpReq = { file: { path: req.file.path } };
+      req.url = "/control-expo/upload-xml";
+      return app._router.handle({ ...req, url: "/control-expo/upload-xml", method: "POST", file: tmpReq.file }, res, ()=>{});
     }
 
-    // Listado/Importación
-    const aprobados = await (async function parseListadoAprobadosXML(xmlStr) {
-      const parsed2 = await parseStringPromise(xmlStr, { explicitArray:false, trim:true, mergeAttrs:true });
-      const list = parsed2?.Listado?.Registro
-        ? (Array.isArray(parsed2.Listado.Registro) ? parsed2.Listado.Registro : [parsed2.Listado.Registro])
-        : [];
-      return list.map(r => {
-        const DESPACHO = r.DESPACHO || "";
-        const CLIENTE  = r.CLIENTE_NOMBRE || "";
-        const PEDIDOR  = r.PEDIDOR_NOMBRE || "";
-        const FECHA_A  = r.FECHA_ACEPTACION || "";
-        const HORA_A   = r.HORA_ACEPTACION || "";
-        const tsISO    = toISOFromFechaHora(FECHA_A, HORA_A);
-        return { despacho: DESPACHO, cliente: CLIENTE, pedidor: PEDIDOR, ts: tsISO };
-      }).filter(x => x.despacho && x.ts);
-    })(xml);
+    // ---- Listado/Importación (aprobados) ----
+    const parsed2 = await parseStringPromise(xml, { explicitArray:false, trim:true, mergeAttrs:true });
+    const list = parsed2?.Listado?.Registro
+      ? (Array.isArray(parsed2.Listado.Registro) ? parsed2.Listado.Registro : [parsed2.Listado.Registro])
+      : [];
+
+    const aprobados = list.map(r => {
+      const DESPACHO = r.DESPACHO || "";
+      const CLIENTE  = r.CLIENTE_NOMBRE || "";
+      const PEDIDOR  = r.PEDIDOR_NOMBRE || "";
+      const FECHA_A  = r.FECHA_ACEPTACION || "";
+      const HORA_A   = r.HORA_ACEPTACION || "";
+      const tsISO    = toISOFromFechaHora(FECHA_A, HORA_A);
+      return { despacho: DESPACHO, cliente: CLIENTE, pedidor: PEDIDOR, ts: tsISO };
+    }).filter(x => x.despacho && x.ts);
 
     const st = loadState();
     const aprobadosNorm = aprobados.map(x => {
@@ -948,8 +858,7 @@ app.post("/upload-xml", upload.single("xml"), async (req, res) => {
     st.aprobado.forEach(a => { if (isTodayTS(a.ts)) { const key = (a.pedidor || "SIN PEDIDOR").toUpperCase(); kpiPedidorHoy[key] = (kpiPedidorHoy[key] || 0) + 1; }});
     st.kpiPedidorHoy = kpiPedidorHoy;
 
-    st.mtime = Date.now();
-    saveState(st);
+    st.mtime = Date.now(); saveState(st);
     return res.redirect("/inicio?ok=Listado+procesado+por+/upload-xml");
   } catch (err) {
     console.error("upload-xml dispatcher error:", err);
@@ -957,7 +866,7 @@ app.post("/upload-xml", upload.single("xml"), async (req, res) => {
   }
 });
 
-// ---------- CONTROL EXPO: Vista ----------
+// ---- CONTROL EXPO: Vista
 app.get("/control-expo", (req, res) => {
   const qDespacho = String(req.query.despacho || "").toUpperCase().trim();
   const qCliente  = String(req.query.cliente  || "").toUpperCase().trim();
@@ -965,7 +874,7 @@ app.get("/control-expo", (req, res) => {
   const fTo       = String(req.query.venc_to   || "").trim();
   const fUrg      = String(req.query.urgencia  || "all"); // all|vencido|proximo|ok
 
-  let rows = loadControlExpoFast();
+  let rows = loadControlExpo();
   const soloSinLegal = (req.query.sin_legalizacion ?? "1") !== "0";
   if (soloSinLegal) rows = rows.filter(r => !String(r.ACEPTA2_ISO || "").trim());
 
@@ -1021,8 +930,6 @@ app.get("/control-expo", (req, res) => {
     sinLegal: soloSinLegal
   });
 });
-
-// Limpiar EXPO
 app.post("/control-expo/clear", (req, res) => {
   saveControlExpo([]);
   return wantsJSON(req)
@@ -1030,143 +937,11 @@ app.post("/control-expo/clear", (req, res) => {
     : res.redirect("/control-expo?ok=Datos+EXPO+limpiados");
 });
 
-// -------- Carga genérica de aprobados (compat) --------
-app.post("/upload-aprobados", upload.single("xmlAprob"), async (req, res) => {
-  try {
-    if (!req.file) return res.status(400).send("Debes subir un XML de aprobados");
-    const xmlStr = fs.readFileSync(req.file.path, "utf8");
-    const parsed = await parseStringPromise(xmlStr, { explicitArray:false, mergeAttrs:true, trim:true });
-
-    let items = [];
-    (function walk(o){
-      if (!o || typeof o !== "object") return;
-      for (const [,v] of Object.entries(o)) {
-        if (Array.isArray(v) && v.length && typeof v[0] === "object") v.forEach(x=>items.push(x));
-        else if (typeof v === "object") walk(v);
-      }
-    })(parsed);
-
-    const aprobItems = items.map((obj, idx) => {
-      const despacho = obj.DESPACHO || obj.despacho || obj.NUMERO || obj.numero || obj.ID || obj.id || String(idx+1);
-      const fechaAcept = obj.FECHA_ACEPTACION || obj.fecha_aceptacion || obj.FECHA_APROBADO || obj.fecha_aprobado || obj.FECHA || obj.fecha || "";
-      const horaAcept  = obj.HORA_ACEPTACION  || obj.hora_aceptacion  || obj.HORA_APROBADO  || obj.hora_aprobado  || "";
-      const estadoTxt  = obj.ESTADO_DESCRIPCION || obj.estado_descripcion || obj.ESTADO || obj.estado || "";
-      let d = joinDateTimeStr(fechaAcept, horaAcept);
-      if (!d && fechaAcept) d = parseCLDate(fechaAcept);
-      return { DESPACHO: String(despacho||"").trim(), FECHA_APROBADO_ISO: d ? d.toISOString() : null, ESTADO_TXT: String(estadoTxt||"").toUpperCase() };
-    }).filter(x => x.DESPACHO);
-
-    const st = loadState();
-    st.aprobado = Array.isArray(st.aprobado) ? st.aprobado : [];
-    const idxByDesp = {}; st.aprobado.forEach((x,i)=>{ idxByDesp[String(x.despacho)] = i; });
-
-    const seen = new Set();
-    aprobItems.forEach(r => {
-      const esAprob = /\bAPROBAD/.test(r.ESTADO_TXT) || !!r.FECHA_APROBADO_ISO;
-      if (!esAprob) return;
-      const dIso = r.FECHA_APROBADO_ISO;
-      const ts = dIso ? new Date(dIso).getTime() : Date.now();
-      const dKey = r.DESPACHO;
-      if (seen.has(dKey)) return; seen.add(dKey);
-      const payload = { despacho:dKey, cliente: pickCliente(dKey) || "", ts, fecha: dIso || null };
-      if (idxByDesp[dKey] !== undefined) {
-        const i = idxByDesp[dKey];
-        if (!st.aprobado[i].fecha && payload.fecha) { st.aprobado[i].fecha = payload.fecha; st.aprobado[i].ts = payload.ts; }
-        else if (payload.fecha && st.aprobado[i].fecha && payload.ts > (st.aprobado[i].ts || 0)) { st.aprobado[i].fecha = payload.fecha; st.aprobado[i].ts = payload.ts; }
-      } else {
-        st.aprobado.unshift(payload);
-      }
-    });
-
-    const byId = new Map();
-    st.aprobado.forEach(x => {
-      const k = String(x.despacho);
-      const old = byId.get(k);
-      if (!old || (x.ts || 0) > (old.ts || 0)) byId.set(k, x);
-    });
-    st.aprobado = Array.from(byId.values()).sort((a,b)=>(b.ts||0)-(a.ts||0));
-    if (st.aprobado.length > 5000) st.aprobado.length = 5000;
-
-    st.mtime = Date.now(); saveState(st);
-    res.redirect("/?page=1");
-  } catch (err) {
-    console.error("❌ Error en /upload-aprobados:", err);
-    res.status(500).send("Error procesando XML de aprobados");
-  }
-});
-
-// ============== SIST, AUTO ==============
-const EXCLUDED_CLIENTS_SIST_AUTO = [
-  "COMERCIAL K","INGRAM","INTCOMEX","CANONTEX","PLASTIVERG","TECNICA THOMAS",
-  "STROLLER","COMERCIAL SNA","COM. IMP JVA","MARIENBERG","PAPIER"
-].map(s => normTxt(s));
-function isExcludedForSistAuto(clienteNombre) {
-  const n = normTxt(clienteNombre || "");
-  return EXCLUDED_CLIENTS_SIST_AUTO.some(tag => n.includes(tag));
-}
-app.get("/sist-auto", (req, res) => {
-  const st = loadState();
-  const rows = mergedRows();
-  const etaByDesp = new Map(rows.map(r => [String(r.DESPACHO), r.FECHA_ETA_FMT || ""]));
-  const clienteByDesp = new Map(rows.map(r => [String(r.DESPACHO), r.CLIENTE_NOMBRE || ""]));
-  const cards = (st.autoAssignedLog || [])
-    .filter(a => !isExcludedForSistAuto(clienteByDesp.get(String(a.despacho)) || ""))
-    .map(a => ({ despacho: a.despacho, pedidor: a.pedidor, tsFmt: new Date(a.ts).toLocaleString("es-CL", { dateStyle:"short", timeStyle:"short" }), eta: etaByDesp.get(String(a.despacho)) || a.eta || "" }));
-  res.render("sist_auto", { cards, limit: 10 });
-});
-app.post("/sist/auto/run", (req, res) => {
-  try {
-    const st = loadState();
-    const qs = String(req.query.pedidores || "").trim();
-    let pedidores = qs ? qs.split(",").map(s=>s.trim()).filter(Boolean) : Object.keys(st.assigned || {});
-    pedidores = Array.from(new Set(pedidores)).filter(Boolean);
-    if (!pedidores.length) return res.status(400).json({ ok:false, msg:"No hay pedidores (use ?pedidores=A,B o cargue XML con claves en assigned)" });
-    const limit = Math.max(1, Math.min(100, parseInt(req.query.limit || "10", 10)));
-    const rows = mergedRows();
-    const unassigned = rows
-      .filter(r => !String(r.pedidor_final || "").trim())
-      .filter(r => !isExcludedForSistAuto(r.CLIENTE_NOMBRE || ""))
-      .sort((a,b)=> (b.FECHA_INGRESO_DATE?.getTime()||0)-(a.FECHA_INGRESO_DATE?.getTime()||0));
-    const counter = Object.fromEntries(pedidores.map(p => [p, 0]));
-    const picks = [];
-    let i = 0;
-    for (const r of unassigned) {
-      let tries = 0, chosen = null;
-      while (tries < pedidores.length) {
-        const ped = pedidores[i % pedidores.length];
-        if (counter[ped] < limit) { chosen = ped; break; }
-        i++; tries++;
-      }
-      if (!chosen) break;
-      counter[chosen] += 1; i++;
-      picks.push({ despacho: String(r.DESPACHO), pedidor: chosen, ts: Date.now(), eta: r.FECHA_ETA_FMT || "" });
-    }
-    st.autoAssignedLog = Array.isArray(st.autoAssignedLog) ? st.autoAssignedLog : [];
-    const map = new Map(st.autoAssignedLog.map(x => [String(x.despacho), x]));
-    picks.forEach(p => map.set(String(p.despacho), p));
-    st.autoAssignedLog = Array.from(map.values()).sort((a,b)=>(b.ts||0)-(a.ts||0));
-    if (st.autoAssignedLog.length > 2000) st.autoAssignedLog.length = 2000;
-    st.mtime = Date.now();
-    saveState(st);
-    res.json({ ok:true, assigned:picks.length, pedidores, limit });
-  } catch (e) {
-    console.error("auto/run error:", e);
-    res.status(500).json({ ok:false, msg:"Error en auto-run" });
-  }
-});
-app.post("/sist/auto/clear", (req, res) => {
-  const st = loadState();
-  st.autoAssignedLog = [];
-  st.mtime = Date.now();
-  saveState(st);
-  res.json({ ok:true });
-});
-
-// ------------------ Vistas varias (si usas estas plantillas) ------------------
+// ---- Vistas varias (si usas)
 app.get("/denuncias", (_, res) => res.render("denuncias"));
 app.get("/clasificacion", (_, res) => res.render("clasificacion"));
 
-// ------------------ Reporte Excel ------------------
+// ---- Reporte Excel
 app.get("/despachos/reporte/xlsx", (req, res) => {
   const rows = mergedRows();
   const wb = xlsx.utils.book_new();
@@ -1177,14 +952,14 @@ app.get("/despachos/reporte/xlsx", (req, res) => {
   res.download(out, "despachos.xlsx");
 });
 
-// ------------------ Error handler (al final) ------------------
+// ====== Error handler ======
 app.use((err, req, res, next) => {
   console.error("❌ Unhandled:", err);
   if (res.headersSent) return;
   res.status(500).send("Error en servidor: " + (err?.message || "desconocido"));
 });
 
-// ------------------ Start ------------------
+// ====== Start / Export ======
 function listenWithRetry(startPort = parseInt(process.env.PORT || "3000", 10), maxAttempts = 10) {
   let port = startPort;
   (async () => {
@@ -1205,4 +980,11 @@ function listenWithRetry(startPort = parseInt(process.env.PORT || "3000", 10), m
     process.exit(1);
   })();
 }
-listenWithRetry();
+
+// En Vercel: exporta el app; en local: escucha
+if (IS_VERCEL) {
+  module.exports = app;          // para @vercel/node (CJS)
+  // export default app;         // para ESM
+} else {
+  listenWithRetry();
+}
