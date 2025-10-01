@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Provisión</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
+  <link href="/static/css/styles.css" rel="stylesheet">
+</head>
+<body class="bg-light">
+  <%- include('partials/navbar') %>
+
+
+<main class="container py-3">
+  <h4 class="mb-3">Clientes Provisión</h4>
+
+  <form class="row g-2 align-items-end mb-3" method="get">
+    <div class="col-12 col-md-5">
+      <label class="form-label">Buscar</label>
+      <input class="form-control" name="q" value="<%= q || '' %>" placeholder="Despacho, cliente, ejecutivo, pedidor…">
+    </div>
+    <div class="col-6 col-md-2">
+      <label class="form-label">Desde</label>
+      <input type="date" class="form-control" name="from" value="<%= from || '' %>">
+    </div>
+    <div class="col-6 col-md-2">
+      <label class="form-label">Hasta</label>
+      <input type="date" class="form-control" name="to" value="<%= to || '' %>">
+    </div>
+    <div class="col-12 col-md-2">
+      <button class="btn btn-primary w-100"><i class="bi bi-funnel"></i> Filtrar</button>
+    </div>
+    <div class="col-12 col-md-1">
+      <a class="btn btn-outline-secondary w-100" href="/provision">Limpiar</a>
+    </div>
+  </form>
+
+  <div class="table-responsive shadow-sm bg-white rounded">
+    <table class="table align-middle mb-0">
+      <thead class="table-light">
+        <tr>
+          <th>Despacho</th>
+          <th>Fecha recepción</th>
+          <th>Cliente</th>
+          <th>Ejecutivo</th>
+          <th>Pedidor</th>
+          <th>ETA</th>
+          <th>Estado</th>
+          <th class="text-center">PDF</th>
+        </tr>
+      </thead>
+      <tbody>
+        <% if(!rows || rows.length===0){ %>
+          <tr><td colspan="8" class="text-muted text-center py-4">Sin resultados para los filtros actuales.</td></tr>
+        <% } %>
+        <% (rows||[]).forEach(function(r){ %>
+          <tr>
+            <td class="fw-semibold"><%= r.despacho %></td>
+            <td><%= r.fechaIng || '—' %></td>
+            <td><%= r.cliente %></td>
+            <td><%= r.ejecutivo || '—' %></td>
+            <td><%= r.pedidor   || '—' %></td>
+            <td><%= r.eta       || '—' %></td>
+            <td><span class="badge text-bg-<%= r.estadoCls %>"><%= r.estadoLbl %></span></td>
+            <td class="text-center">
+              <% if(r.pdf){ %>
+                <a class="btn btn-sm btn-outline-primary" href="<%= r.pdf %>" target="_blank" title="Ver PDF">
+                  <i class="bi bi-filetype-pdf"></i>
+                </a>
+              <% } else { %>
+                <span class="text-muted">—</span>
+              <% } %>
+            </td>
+          </tr>
+        <% }) %>
+      </tbody>
+    </table>
+  </div>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js" defer></script>
+</body>
+</html>

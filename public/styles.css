@@ -1,0 +1,87 @@
+﻿:root{
+  --soft-blue:   #d7e8ff;
+  --soft-green:  #d9f5dc;
+  --soft-yellow: #fff4cc;
+  --soft-gray:   #eceff3;
+}
+.bg-soft-blue   { background: var(--soft-blue); }
+.bg-soft-green  { background: var(--soft-green); }
+.bg-soft-yellow { background: var(--soft-yellow); }
+.bg-soft-gray   { background: var(--soft-gray); }
+
+.card .badge{ font-weight:600; }
+.table td, .table th { vertical-align: middle; }
+/* Fila aprobada: verde muy suave */
+.row-aprobado {
+  background-color: #eaf7ea; /* verde claro suave */
+}
+
+/* Tachado solo al despacho */
+.striked {
+  text-decoration: line-through;
+}
+/* Verde translúcido estilo "success subtle" */
+.row-aprobado {
+  background-color: rgba(25, 135, 84, 0.12);
+}
+.row-aprobado {
+  background-color: rgba(0, 200, 0, 0.08); /* verde muy suave y transparente */
+}
+.striked { text-decoration: line-through; }
+/* ==== Base general ==== */
+:root {
+  --card-radius: 1rem;
+}
+body {
+  background: #f6f8fa;
+}
+
+/* ==== Tarjetas y contenedores ==== */
+.card {
+  border: 1px solid rgba(0,0,0,.06);
+  border-radius: var(--card-radius);
+}
+.table-responsive {
+  border-radius: var(--card-radius);
+  overflow: hidden;
+}
+
+/* ==== Tabla EXPO ==== */
+.table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  background: #f8f9fa;
+}
+.tr-vencido { background: #fff0f0; }    /* rojo muy suave */
+.tr-urgente { background: #fff8e1; }    /* amarillo suave */
+
+/* Columnas más angostas para compactar */
+th.col-sm, td.col-sm   { width: 120px; }
+th.col-md, td.col-md   { width: 160px; }
+th.col-lg, td.col-lg   { width: 220px; }
+
+/* ==== Badges de días ==== */
+.badge-days { font-weight: 600; letter-spacing: .2px; }
+.badge-days.ok { background: #e7f4e8; color: #0a5f16; }
+.badge-days.warn { background: #fff3cd; color: #614a00; }
+.badge-days.danger { background: #f8d7da; color: #842029; }
+
+/* ==== Filtros (barra) ==== */
+.filters-bar .form-label { font-size: .8rem; color: #6c757d; }
+.filters-bar .form-control, 
+.filters-bar .form-select { min-width: 180px; }
+.filters-bar .btn { height: 38px; }
+
+/* ==== Tooltip-like helper ==== */
+.text-hint { color:#6c757d; font-size:.85rem; }
+
+/* Links sin subrayado en tabla */
+a.table-link {
+  text-decoration: none;
+}
+a.table-link:hover {
+  text-decoration: underline;
+}
+/* espacio para la navbar fixed-top */
+body { padding-top: 4rem; }

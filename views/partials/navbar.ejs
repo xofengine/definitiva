@@ -1,0 +1,63 @@
+<%
+  const cur = (path || "/");
+  const isActive = (p) => cur.startsWith(p) ? "active" : "";
+  const isAnyActive = (arr) => arr.some(p => cur.startsWith(p)) ? "active" : "";
+%>
+<nav class="navbar navbar-expand-lg navbar-dark bg-dark mb-3">
+  <div class="container-fluid">
+    <a class="navbar-brand fw-semibold" href="/">Portal</a>
+
+    <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#topNav"
+            aria-controls="topNav" aria-expanded="false" aria-label="Toggle navigation">
+      <span class="navbar-toggler-icon"></span>
+    </button>
+
+    <div class="collapse navbar-collapse" id="topNav">
+      <ul class="navbar-nav me-auto mb-2 mb-lg-0">
+
+        <!-- Despachos -->
+        <li class="nav-item dropdown">
+          <a class="nav-link dropdown-toggle <%= isAnyActive(['/', '/inicio', '/cargados', '/provision']) %>"
+             href="#" id="dd-despachos" role="button" data-bs-toggle="dropdown" aria-expanded="false">
+            Despachos
+          </a>
+          <ul class="dropdown-menu" aria-labelledby="dd-despachos">
+            <li><a class="dropdown-item <%= isActive('/') %>" href="/">Listado</a></li>
+            <li><a class="dropdown-item <%= isActive('/inicio') %>" href="/inicio">Flujo</a></li>
+            <li><a class="dropdown-item <%= isActive('/cargados') %>" href="/cargados">Cargados</a></li>
+            <li><a class="dropdown-item <%= isActive('/provision') %>" href="/provision">Provisión</a></li>
+          </ul>
+        </li>
+
+        <!-- EXPO -->
+        <li class="nav-item dropdown">
+          <a class="nav-link dropdown-toggle <%= isActive('/control-expo') %>"
+             href="#" id="dd-expo" role="button" data-bs-toggle="dropdown" aria-expanded="false">
+            EXPO
+          </a>
+          <ul class="dropdown-menu" aria-labelledby="dd-expo">
+            <li><a class="dropdown-item <%= isActive('/control-expo') %>" href="/control-expo">Control EXPO</a></li>
+          </ul>
+        </li>
+
+        <!-- Herramientas -->
+        <li class="nav-item dropdown">
+          <a class="nav-link dropdown-toggle <%= isAnyActive(['/aplicacion', '/sist-auto']) %>"
+             href="#" id="dd-tools" role="button" data-bs-toggle="dropdown" aria-expanded="false">
+            Herramientas
+          </a>
+          <ul class="dropdown-menu" aria-labelledby="dd-tools">
+            <li><a class="dropdown-item <%= isActive('/aplicacion') %>" href="/aplicacion">Aplicación (PDF)</a></li>
+            <li><a class="dropdown-item <%= isActive('/sist-auto') %>" href="/sist-auto">SIST Auto</a></li>
+          </ul>
+        </li>
+
+        <!-- Arancel (link directo) -->
+        <li class="nav-item">
+          <a class="nav-link <%= isActive('/arancel') %>" href="/arancel">Arancel</a>
+        </li>
+
+      </ul>
+    </div>
+  </div>
+</nav>

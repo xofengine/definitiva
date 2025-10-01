@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <title>Control EXPO</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- Si ya tienes Bootstrap en tu layout, puedes quitar este CDN.
+       Lo dejo por si esta vista se sirve “sola”. -->
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="/static/css/styles.css" rel="stylesheet">
+  <style>
+    /* Refuerzos por si no está tu styles.css */
+    .kpi-card { border-radius: 14px; }
+    .kpi-title { font-size: .9rem; opacity:.8; }
+    .row-urg-vencido   { border-left: 6px solid #dc3545; }
+    .row-urg-proximo   { border-left: 6px solid #ffc107; }
+    .row-urg-ok        { border-left: 6px solid #198754; }
+    .row-urg-desconoc  { border-left: 6px solid #6c757d; }
+    .text-small { font-size:.875rem }
+    .table thead th { white-space: nowrap; }
+    .badge-soft { padding:.4rem .6rem; border-radius: 999px; }
+    .badge-danger-soft { background:#f8d7da; color:#842029; }
+    .badge-warning-soft{ background:#fff3cd; color:#664d03; }
+    .badge-success-soft{ background:#d1e7dd; color:#0f5132; }
+    .badge-secondary-soft{ background:#e2e3e5; color:#41464b; }
+  </style>
+</head>
+<body class="bg-light">
+
+  <div class="container-fluid py-2">
+    <!-- NAV -->
+    <%- include('partials/navbar') %>
+
+    <div class="d-flex align-items-center justify-content-between mt-2 mb-3">
+      <h3 class="m-0">Control EXPO</h3>
+
+      <!-- Ordenar cliente-side -->
+      <div class="d-flex gap-2">
+        <div class="d-flex gap-2">
+  <button id="btnSortVto" class="btn btn-outline-primary btn-sm" type="button" data-order="asc">
+    Ordenar por vencimiento: <span id="lblSort">asc</span>
+  </button>
+
+  <!-- SUBIR XML EXPO -->
+  <form action="/control-expo/upload-xml" method="post" enctype="multipart/form-data"
+        class="d-flex align-items-center gap-2">
+    <input type="file" name="xml" accept=".xml,text/xml" class="form-control form-control-sm" required>
+    <button type="submit" class="btn btn-success btn-sm">Subir XML EXPO</button>
+  </form>
+</div>
+
+        <button id="btnSortVto" class="btn btn-outline-primary btn-sm" type="button" data-order="asc">
+          Ordenar por vencimiento: <span id="lblSort">asc</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- FILTROS -->
+    <form class="card card-body mb-3 shadow-sm">
+      <div class="row g-2 align-items-end">
+        <div class="col-6 col-md-3">
+          <label class="form-label">Despacho</label>
+          <input type="text" name="despacho" value="<%= qDespacho %>" class="form-control form-control-sm" placeholder="Ej: 123456">
+        </div>
+        <div class="col-6 col-md-3">
+          <label class="form-label">Cliente</label>
+          <input type="text" name="cliente" value="<%= qCliente %>" class="form-control form-control-sm" placeholder="Nombre cliente">
+        </div>
+
+        <div class="col-6 col-md-2">
+          <label class="form-label">Venc. desde</label>
+          <input type="date" name="venc_from" value="<%= fFrom %>" class="form-control form-control-sm">
+        </div>
+        <div class="col-6 col-md-2">
+          <label class="form-label">Venc. hasta</label>
+          <input type="date" name="venc_to" value="<%= fTo %>" class="form-control form-control-sm">
+        </div>
+
+        <div class="col-6 col-md-2">
+          <label class="form-label">Urgencia</label>
+          <select name="urgencia" class="form-select form-select-sm">
+            <option value="all"     <%= (fUrg||"all")==="all" ? "selected":"" %>>Todas</option>
+            <option value="vencido" <%= fUrg==="vencido" ? "selected":"" %>>Vencido</option>
+            <option value="proximo" <%= fUrg==="proximo" ? "selected":"" %>>Próximo (≤3)</option>
+            <option value="ok"      <%= fUrg==="ok" ? "selected":"" %>>OK (&gt;3)</option>
+          </select>
+        </div>
+
+        <div class="col-12 col-md-3">
+          <div class="form-check mt-3">
+            <input class="form-check-input" type="checkbox" id="chkSinLegal" name="sin_legalizacion" value="1" <%= (typeof sinLegal==="undefined" || sinLegal) ? "checked":"" %> >
+            <label class="form-check-label" for="chkSinLegal">Mostrar solo DUS sin legalización</label>
+          </div>
+        </div>
+
+        <div class="col-12 col-md-3 mt-2 mt-md-0">
+          <button class="btn btn-primary btn-sm w-100">Filtrar</button>
+        </div>
+      </div>
+    </form>
+
+    <!-- KPIs (se calculan aquí con EJS) -->
+    <%
+      const kpis = { venc:0, prox:0, ok:0, nd:0 };
+      (rows||[]).forEach(r=>{
+        const d = r.DIAS;
+        if (d === null || d === undefined) kpis.nd++;
+        else if (d < 0) kpis.venc++;
+        else if (d <= 3) kpis.prox++;
+        else kpis.ok++;
+      });
+      function kpHref(kind){
+        const params = new URLSearchParams({
+          despacho: qDespacho || "",
+          cliente: qCliente || "",
+          venc_from: fFrom || "",
+          venc_to: fTo || "",
+          sin_legalizacion: (typeof sinLegal==="undefined" || sinLegal) ? "1":"0",
+          urgencia: kind
+        });
+        return `/control-expo?${params.toString()}`;
+      }
+    %>
+
+    <div class="row g-2 mb-3">
+      <div class="col-6 col-md-3">
+        <a class="text-decoration-none" href="<%= kpHref('vencido') %>">
+          <div class="kpi-card p-3 bg-danger-subtle text-danger-emphasis shadow-sm">
+            <div class="kpi-title">Vencidos</div>
+            <div class="fs-3 fw-bold"><%= kpis.venc %></div>
+          </div>
+        </a>
+      </div>
+      <div class="col-6 col-md-3">
+        <a class="text-decoration-none" href="<%= kpHref('proximo') %>">
+          <div class="kpi-card p-3 bg-warning-subtle text-warning-emphasis shadow-sm">
+            <div class="kpi-title">Próximos (≤ 3 días)</div>
+            <div class="fs-3 fw-bold"><%= kpis.prox %></div>
+          </div>
+        </a>
+      </div>
+      <div class="col-6 col-md-3">
+        <a class="text-decoration-none" href="<%= kpHref('ok') %>">
+          <div class="kpi-card p-3 bg-success-subtle text-success-emphasis shadow-sm">
+            <div class="kpi-title">OK (&gt; 3 días)</div>
+            <div class="fs-3 fw-bold"><%= kpis.ok %></div>
+          </div>
+        </a>
+      </div>
+      <div class="col-6 col-md-3">
+        <a class="text-decoration-none" href="<%= kpHref('all') %>">
+          <div class="kpi-card p-3 bg-secondary-subtle text-secondary-emphasis shadow-sm">
+            <div class="kpi-title">Sin días / N/D</div>
+            <div class="fs-3 fw-bold"><%= kpis.nd %></div>
+          </div>
+        </a>
+      </div>
+    </div>
+
+    <!-- TABLA -->
+    <div class="card shadow-sm">
+      <div class="table-responsive">
+        <table id="tblExpo" class="table table-sm table-hover align-middle m-0">
+          <thead class="table-light">
+            <tr>
+              <th>Despacho</th>
+              <th>Cliente</th>
+              <th>Acepta 1</th>
+              <th>Legalización</th>
+              <th>DUS</th>
+              <th>Fecha Venc.</th>
+              <th>Días</th>
+              <th>Pedidor</th>
+              <th>Ejecutivo</th>
+              <th>Prórrogas</th>
+            </tr>
+          </thead>
+          <tbody>
+            <% (rows||[]).forEach(r => {
+                 const d = r.DIAS;
+                 let urgCl = "row-urg-desconoc", badgeCl="badge-secondary-soft", badgeTxt="N/D";
+                 if (d !== null && d !== undefined) {
+                   if (d < 0)      { urgCl = "row-urg-vencido"; badgeCl="badge-danger-soft";  badgeTxt="Vencido"; }
+                   else if (d<=3 ) { urgCl = "row-urg-proximo"; badgeCl="badge-warning-soft"; badgeTxt="Próximo"; }
+                   else            { urgCl = "row-urg-ok";      badgeCl="badge-success-soft"; badgeTxt="OK"; }
+                 }
+                 const vtoTime = (r.DUS_VENCIMIENTO_TIME ?? Number.POSITIVE_INFINITY);
+            %>
+              <tr class="<%= urgCl %>" data-vto="<%= vtoTime %>">
+                <td>
+                  <div class="fw-semibold"><%= r.DESPACHO || "—" %></div>
+                  <div class="text-small">
+                    <span class="badge badge-soft <%= badgeCl %>"><%= badgeTxt %></span>
+                  </div>
+                </td>
+                <td><%= (r.CLIENTE || "—") %></td>
+                <td><%= r.ACEPTA1_FMT || "—" %></td>
+                <td><%= r.ACEPTA2_FMT || "—" %></td>
+                <td><%= r.DUS || "—" %></td>
+                <td><%= r.DUS_VENCIMIENTO_FMT || "—" %></td>
+                <td><%= (d===null || d===undefined) ? "—" : d %></td>
+                <td><%= r.PEDIDOR || "—" %></td>
+                <td><%= r.EJECUTIVO || "—" %></td>
+                <td><%= r.PRORROGAS || "—" %></td>
+              </tr>
+            <% }) %>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+  </div>
+
+  <script>
+    // Toggle ordenar (cliente-side) por fecha de vencimiento usando data-vto
+    (function(){
+      const btn = document.getElementById('btnSortVto');
+      const lbl = document.getElementById('lblSort');
+      const tbody = document.querySelector('#tblExpo tbody');
+
+      function sortRows(order){
+        const rows = Array.from(tbody.querySelectorAll('tr'));
+        rows.sort((a,b)=>{
+          const ta = Number(a.getAttribute('data-vto') || 9e15);
+          const tb = Number(b.getAttribute('data-vto') || 9e15);
+          return order === 'asc' ? (ta - tb) : (tb - ta);
+        });
+        rows.forEach(r => tbody.appendChild(r));
+      }
+
+      // estado inicial desde data-order
+      sortRows(btn.dataset.order || 'asc');
+
+      btn.addEventListener('click', ()=>{
+        const current = btn.dataset.order === 'asc' ? 'desc' : 'asc';
+        btn.dataset.order = current;
+        lbl.textContent = current;
+        sortRows(current);
+      });
+    })();
+  </script>
+</body>
+</html>

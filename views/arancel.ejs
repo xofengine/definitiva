@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <title>Arancel</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    body { background:#f6f7fb; }
+    .table-fixed thead th { position: sticky; top: 0; background: #fff; z-index: 1; }
+    .code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; letter-spacing: .3px; }
+  </style>
+</head>
+<body>
+  <%- include('partials/navbar') %>
+
+  <div class="container-xxl py-3">
+    <div class="d-flex align-items-center justify-content-between mb-3">
+      <h3 class="mb-0">Arancel 2022</h3>
+      <div id="totInfo" class="text-muted small"></div>
+    </div>
+
+    <form id="frm" class="row g-2 align-items-end mb-3" onsubmit="return false;">
+      <div class="col-12 col-md-4">
+        <label class="form-label">Partida arancelaria</label>
+        <input id="qPartida" class="form-control" placeholder="Ej: 8517. o 85171100" autocomplete="off">
+      </div>
+      <div class="col-12 col-md-4">
+        <label class="form-label">Descripción / Glosa</label>
+        <input id="qDesc" class="form-control" placeholder="Texto libre en glosa / descripción" autocomplete="off">
+      </div>
+      <div class="col-6 col-md-2">
+        <label class="form-label">Orden</label>
+        <select id="order" class="form-select">
+          <option value="asc">Partida ascendente</option>
+          <option value="desc">Partida descendente</option>
+        </select>
+      </div>
+      <div class="col-6 col-md-2">
+        <label class="form-label">Por página</label>
+        <select id="per" class="form-select">
+          <option>50</option>
+          <option selected>100</option>
+          <option>200</option>
+          <option>500</option>
+        </select>
+      </div>
+      <div class="col-12">
+        <button id="btnBuscar" class="btn btn-primary me-2">Buscar</button>
+        <button id="btnLimpiar" class="btn btn-outline-secondary">Limpiar</button>
+      </div>
+    </form>
+
+    <div class="table-responsive">
+      <table class="table table-sm table-hover align-middle table-fixed">
+        <thead>
+          <tr>
+            <th id="thPart" style="width:14rem">Código del S.A.</th>
+            <th id="thDesc">Glosa</th>
+          </tr>
+        </thead>
+        <tbody id="tbody">
+          <tr><td colspan="2" class="text-muted">Cargando…</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="d-flex justify-content-between align-items-center mt-3">
+      <button id="prev" class="btn btn-outline-secondary btn-sm">« Anterior</button>
+      <div id="pinfo" class="small text-muted"></div>
+      <button id="next" class="btn btn-outline-secondary btn-sm">Siguiente »</button>
+    </div>
+  </div>
+
+<script>
+(() => {
+  const el = (id) => document.getElementById(id);
+  const state = { page: 1 };
+
+  // Renderiza filas; usa indices que llega del servidor (partIdx/descIdx)
+  function render(data) {
+    const tb = el('tbody');
+    const rows = Array.isArray(data.rows) ? data.rows : [];
+    const partIdx = Number.isInteger(data.partIdx) ? data.partIdx : 0;
+    const descIdx = Number.isInteger(data.descIdx) ? data.descIdx : 1;
+
+    if (!rows.length) {
+      tb.innerHTML = '<tr><td colspan="2" class="text-muted">Sin resultados para el filtro.</td></tr>';
+    } else {
+      tb.innerHTML = rows.map(r => {
+        const c = Array.isArray(r) ? r : [];
+        const code = (c[partIdx] ?? '').toString();       // IMPORTANTE: NO convertir a número
+        const glos = (c[descIdx] ?? '').toString();
+        return `<tr>
+          <td class="code">${code}</td>
+          <td>${glos}</td>
+        </tr>`;
+      }).join('');
+    }
+
+    // info
+    el('pinfo').textContent = `Página ${data.page} de ${data.totalPages} • ${data.total} resultado(s)`;
+    el('totInfo').textContent = data.total ? `${data.total} filas encontradas` : '';
+    el('prev').disabled = (data.page <= 1);
+    el('next').disabled = (data.page >= data.totalPages);
+  }
+
+  async function load(page = 1) {
+    state.page = page;
+    const q     = el('qPartida').value.trim();
+    const desc  = el('qDesc').value.trim();
+    const per   = el('per').value;
+    const sort  = el('order').value;
+
+    // Llama SIEMPRE al backend; el filtro por prefijo se hace sobre TODO el dataset
+    const qs = new URLSearchParams({ q, desc, sort, per, page: state.page });
+    const resp = await fetch(`/arancel/data?${qs.toString()}`, { headers: { 'Accept': 'application/json' } });
+    const data = await resp.json();
+    render(data);
+  }
+
+  // Eventos
+  el('btnBuscar').addEventListener('click', () => load(1));
+  el('btnLimpiar').addEventListener('click', () => {
+    el('qPartida').value = '';
+    el('qDesc').value = '';
+    el('order').value = 'asc';
+    load(1);
+  });
+  el('prev').addEventListener('click', () => load(Math.max(1, state.page - 1)));
+  el('next').addEventListener('click', () => load(state.page + 1));
+
+  // Enter en inputs
+  el('qPartida').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); load(1); }});
+  el('qDesc').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); load(1); }});
+
+  // Carga inicial
+  load(1);
+})();
+</script>
+</body>
+</html>

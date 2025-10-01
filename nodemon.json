@@ -1,0 +1,6 @@
+
+{
+  "watch": ["server.js", "views", "public"],
+  "ignore": ["data/**", "uploads/**", "**/*.xlsx", "**/*.pdf"],
+  "ext": "js,ejs,css,html"
+}

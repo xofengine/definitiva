@@ -1,0 +1,126 @@
+﻿<!doctype html>
+<html lang='es'>
+<head>
+  <meta charset='utf-8'>
+  <meta name='viewport' content='width=device-width,initial-scale=1'>
+  <title>Flujo</title>
+  <link href='https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css' rel='stylesheet'>
+  <link href='https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css' rel='stylesheet'>
+  <link href='/static/css/styles.css' rel='stylesheet'>
+</head>
+<body class='bg-light'>
+  <%- include('partials/navbar') %>
+
+
+<main class='container py-3'>
+  <div class='row g-3'>
+    <div class='col-12 col-lg-3'>
+      <div class='card shadow-sm'>
+        <div class='card-header fw-semibold'>Pedidores (últimas 5h)</div>
+        <div class='card-body'>
+          <% if(Object.keys(assignedView || {}).length===0){ %>
+            <div class='text-muted'>Sin asignaciones recientes</div>
+          <% } %>
+          <form method="post" action="/flujo/clear-assigned" onsubmit="return confirm('¿Vaciar la grilla de pedidores (asignados recientes)?');">
+  <button class="btn btn-outline-secondary btn-sm w-100 mt-3" type="submit">
+    <i class="bi bi-broom"></i> Limpiar pedidores (izquierda)
+  </button>
+</form>
+    <form method="post" action="/flujo/clear-aprobados" onsubmit="return confirm('¿Vaciar la lista de aprobados?');">
+  <button class="btn btn-outline-success btn-sm w-100 mt-3" type="submit">
+    <i class="bi bi-broom"></i> Limpiar
+  </button>
+</form>
+          <% Object.keys(assignedView || {}).forEach(function(ped){ var items = assignedView[ped] || []; %>
+            <div class='mb-3'>
+              <div class='fw-semibold border-start border-3 ps-2'><%= ped %></div>
+              <ul class='list-unstyled small mb-0'>
+                <% items.forEach(function(it){ %>
+                  <li class='d-flex justify-content-between align-items-center py-1 border-bottom'>
+                    <span>
+                      <strong><%= it.despacho %></strong> · <span class='text-muted'><%= it.hora %></span>
+                      <div class='text-muted'><%= it.clienteCorto %></div>
+                    </span>
+                    <span class='badge text-bg-<%= it.badgeColor || "light" %>'><%= it.badgeLabel || "—" %></span>
+                      <span class="badge text-bg-<%= it.estadoCls %>"><%= it.estadoLabel %></span>
+                  </li>
+                <% }) %>
+              </ul>
+            </div>
+          <% }) %>
+        </div>
+        <div class="d-flex align-items-center justify-content-between mb-2">
+  <h5 class="mb-0">Aprobados</h5>
+
+  
+
+</div>
+
+      </div>
+        
+      <div class='card mt-3 shadow-sm'>
+        <div class='card-body'>
+          <div class='d-flex align-items-center gap-2'>
+            <div class='display-6'><%= kpi || 0 %></div>
+            <div>Revisados hoy</div>
+          </div>
+          <div class='text-muted small'>Acumulado del día</div>
+        </div>
+      </div>
+
+      <button id='btn-purgar-presentado' class='btn btn-outline-success mt-3 w-100'>
+        <i class='bi bi-x-circle'></i> Purgar Presentados
+      </button>
+    </div>
+
+    <div class='col-12 col-lg-9'>
+      <div class='row g-3'>
+        <% 
+          var sections = [
+            {key:'revision',  title:'En revisión',  color:'primary'},
+            {key:'revisado',  title:'Revisado',     color:'secondary'},
+            {key:'esperando', title:'Esperando ok', color:'warning'},
+            {key:'cargado',   title:'Cargado',      color:'info'},
+            {key:'aprobado',  title:'Aprobado',     color:'success'},
+            {key:'presentado',title:'Presentado',   color:'dark'}
+          ];
+          var lists = { revision:(revision||[]), revisado:(revisado||[]), esperando:(esperando||[]), cargado:(cargado||[]), aprobado:(aprobado||[]), presentado:(presentado||[]) };
+        %>
+
+        <% sections.forEach(function(sec){ var list = lists[sec.key] || []; %>
+          <div class='col-12'>
+            <div class='d-flex align-items-center mb-2'>
+              <h5 class='mb-0'>
+                <span class='badge bg-<%= sec.color %>'>&nbsp;</span> <%= sec.title %>
+                <span class='badge text-bg-light ms-2'><%= list.length %></span>
+              </h5>
+            </div>
+            <div class='d-flex flex-wrap gap-2'>
+              <% if(list.length===0){ %><div class='text-muted small'>Sin elementos</div><% } %>
+              <% list.forEach(function(card){ %>
+                <div class='card shadow-sm' style='min-width:260px; max-width:320px;'>
+                  <div class='card-body'>
+                    <div class='d-flex justify-content-between align-items-start'>
+                      <div>
+                        <div class='fw-semibold'><%= card.despacho %></div>
+                        <div class='text-muted small'><%= card.cliente || "" %></div>
+                        <div class='text-muted small'><%= (new Date(card.ts||Date.now())).toLocaleTimeString("es-CL",{hour:"2-digit",minute:"2-digit"}) %></div>
+                      </div>
+                      <button class='btn btn-sm btn-outline-secondary btn-advance' data-sec='<%= sec.key %>' data-d='<%= card.despacho %>' title='Mover / eliminar'>✕</button>
+                    </div>
+                  </div>
+                </div>
+              <% }) %>
+            </div>
+          </div>
+        <% }) %>
+      </div>
+    </div>
+  </div>
+</main>
+
+<div id='toastContainer' class='toast-container position-fixed bottom-0 end-0 p-3'></div>
+<script src='https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js' defer></script>
+<script src='/static/js/app.js' defer></script>
+</body>
+</html>

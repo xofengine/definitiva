@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Aplicación · Merge PDF (Drag & Drop)</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.css" rel="stylesheet">
+  <style>
+    .dropzone {
+      border: 2px dashed #ced4da;
+      background: #f8f9fa;
+      border-radius: .5rem;
+      padding: 1.25rem;
+      text-align: center;
+      transition: background .2s,border-color .2s;
+    }
+    .dropzone.dragover {
+      background: #eef7ff;
+      border-color: #0d6efd;
+    }
+    .file-list { list-style: none; padding: 0; margin: 0; }
+    .file-item {
+      display: flex; align-items: center; gap: .75rem;
+      background: #fff; border: 1px solid #e9ecef; border-radius: .5rem;
+      padding: .5rem .75rem; margin-bottom: .5rem;
+    }
+    .file-item[draggable="true"] { cursor: grab; }
+    .file-item.dragging { opacity: .6; }
+    .file-name { flex: 1; word-break: break-all; }
+    .file-actions .btn { padding: .2rem .45rem; }
+    .handle { color: #6c757d; cursor: grab; }
+  </style>
+</head>
+<body class="bg-light">
+  <%- include('partials/navbar') %>
+    
+
+<main class="container py-4">
+  <h3 class="mb-3">Unir PDFs (Drag & Drop)</h3>
+  <p class="text-muted">Arrastra varios PDFs, ordénalos y genera un único documento.</p>
+
+  <% if (error) { %>
+    <div class="alert alert-danger"><%= error %></div>
+  <% } %>
+
+  <div class="card shadow-sm p-3 mb-4">
+    <!-- Dropzone -->
+    <div id="dropzone" class="dropzone mb-3">
+      <i class="bi bi-upload fs-3 d-block mb-2"></i>
+      <div class="fw-semibold">Arrastra tus PDFs aquí</div>
+      <div class="text-muted small mb-2">o</div>
+      <button id="btnPick" class="btn btn-outline-primary btn-sm" type="button">
+        <i class="bi bi-folder2-open"></i> Seleccionar PDFs
+      </button>
+      <input id="fileInput" type="file" accept="application/pdf" multiple hidden>
+    </div>
+
+    <!-- Lista reordenable -->
+    <div class="mb-2 d-flex justify-content-between align-items-center">
+      <div class="fw-semibold">Archivos seleccionados</div>
+      <div class="text-muted small"><span id="count">0</span> archivo(s)</div>
+    </div>
+    <ul id="fileList" class="file-list"></ul>
+
+    <div class="d-flex gap-2 mt-3">
+      <button id="btnMerge" class="btn btn-primary" type="button" disabled>
+        <i class="bi bi-files"></i> Unir PDFs en este orden
+      </button>
+      <button id="btnClear" class="btn btn-outline-secondary" type="button">
+        <i class="bi bi-x-circle"></i> Limpiar
+      </button>
+    </div>
+  </div>
+
+  <% if (merged) { %>
+    <div class="alert alert-success d-flex align-items-center justify-content-between">
+      <div><i class="bi bi-check-circle me-2"></i> ¡PDF unido listo!</div>
+      <a class="btn btn-success" href="<%= merged %>" target="_blank">
+        <i class="bi bi-download"></i> Descargar PDF unido
+      </a>
+    </div>
+    <div class="ratio ratio-16x9 border rounded bg-white shadow-sm">
+      <iframe src="<%= merged %>" title="PDF Unido" style="border:0;"></iframe>
+    </div>
+  <% } %>
+</main>
+
+<script>
+(() => {
+  const dropzone = document.getElementById('dropzone');
+  const fileInput = document.getElementById('fileInput');
+  const btnPick = document.getElementById('btnPick');
+  const btnMerge = document.getElementById('btnMerge');
+  const btnClear = document.getElementById('btnClear');
+  const fileListEl = document.getElementById('fileList');
+  const countEl = document.getElementById('count');
+
+  /** Estado local: Array<File> en el orden actual */
+  let files = [];
+
+  const updateUI = () => {
+    countEl.textContent = String(files.length);
+    btnMerge.disabled = files.length === 0;
+
+    fileListEl.innerHTML = '';
+    files.forEach((file, idx) => {
+      const li = document.createElement('li');
+      li.className = 'file-item';
+      li.setAttribute('draggable', 'true');
+      li.dataset.index = idx;
+
+      li.innerHTML = `
+        <span class="handle bi bi-grip-vertical" title="Arrastrar para reordenar"></span>
+        <span class="file-name">${file.name}</span>
+        <span class="text-muted small">${Math.max(1, Math.round(file.size/1024))} KB</span>
+        <div class="file-actions ms-2">
+          <button type="button" class="btn btn-outline-danger btn-sm" title="Quitar">
+            <i class="bi bi-trash"></i>
+          </button>
+        </div>
+      `;
+
+      // Quitar
+      li.querySelector('.btn-outline-danger').addEventListener('click', () => {
+        files.splice(idx, 1);
+        updateUI();
+      });
+
+      // Drag & drop reordenable
+      li.addEventListener('dragstart', (e) => {
+        li.classList.add('dragging');
+        e.dataTransfer.setData('text/plain', idx.toString());
+      });
+      li.addEventListener('dragend', () => li.classList.remove('dragging'));
+      li.addEventListener('dragover', (e) => e.preventDefault());
+      li.addEventListener('drop', (e) => {
+        e.preventDefault();
+        const from = parseInt(e.dataTransfer.getData('text/plain'), 10);
+        const to = idx;
+        if (!Number.isNaN(from) && from !== to) {
+          const moving = files.splice(from, 1)[0];
+          files.splice(to, 0, moving);
+          updateUI();
+        }
+      });
+
+      fileListEl.appendChild(li);
+    });
+  };
+
+  const addFiles = (fileList) => {
+    // Solo PDFs, evita duplicados por nombre+tamaño si quieres
+    const incoming = Array.from(fileList).filter(f => f.type === 'application/pdf');
+    files = files.concat(incoming);
+    updateUI();
+  };
+
+  // Botón seleccionar
+  btnPick.addEventListener('click', () => fileInput.click());
+  fileInput.addEventListener('change', (e) => addFiles(e.target.files));
+
+  // Dropzone
+  const preventDefaults = (e) => { e.preventDefault(); e.stopPropagation(); };
+  ['dragenter','dragover','dragleave','drop'].forEach(ev => {
+    dropzone.addEventListener(ev, preventDefaults, false);
+  });
+  ['dragenter','dragover'].forEach(ev => {
+    dropzone.addEventListener(ev, () => dropzone.classList.add('dragover'), false);
+  });
+  ['dragleave','drop'].forEach(ev => {
+    dropzone.addEventListener(ev, () => dropzone.classList.remove('dragover'), false);
+  });
+  dropzone.addEventListener('drop', (e) => {
+    if (e.dataTransfer && e.dataTransfer.files) addFiles(e.dataTransfer.files);
+  });
+
+  // Limpiar
+  btnClear.addEventListener('click', () => {
+    files = [];
+    fileInput.value = '';
+    updateUI();
+  });
+
+  // Enviar en el orden actual usando FormData y fetch
+  btnMerge.addEventListener('click', async () => {
+    if (!files.length) return;
+    const fd = new FormData();
+    files.forEach(f => fd.append('pdfs', f, f.name));
+
+    btnMerge.disabled = true;
+    btnMerge.innerHTML = '<span class="spinner-border spinner-border-sm me-2"></span>Uniendo...';
+
+    try {
+      const resp = await fetch('/aplicacion/merge', { method: 'POST', body: fd, redirect: 'follow' });
+      // El servidor hace redirect a /aplicacion?merged=...
+      // fetch sigue el redirect; usamos resp.url para redirigir la página
+      if (resp.ok) {
+        window.location = resp.url; // nos lleva a /aplicacion?merged=/uploads/...
+      } else {
+        alert('No se pudo unir los PDFs.');
+        btnMerge.disabled = false;
+        btnMerge.innerHTML = '<i class="bi bi-files"></i> Unir PDFs en este orden';
+      }
+    } catch (e) {
+      console.error(e);
+      alert('Error de red al unir los PDFs.');
+      btnMerge.disabled = false;
+      btnMerge.innerHTML = '<i class="bi bi-files"></i> Unir PDFs en este orden';
+    }
+  });
+
+  // Init
+  updateUI();
+})();
+</script>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js" defer></script>
+</body>
+</html>
