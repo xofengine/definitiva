@@ -1,6 +1,7 @@
-// server.js — Express + Vercel Blob (PUBLIC) para XML/PDF y JSON de estado
-// - En Vercel: usa memoryStorage + Blob (public) y exporta la app.
-// - En local: usa disco ./uploads y ./data para probar cómodo.
+// server.js — Express + Vercel Blob (PUBLIC) + cache.json persistente
+// by Bob (ajustes integrados)
+// • En Vercel: storage en Blob (public) para XML/PDF/JSON, multer en memoria.
+// • En local: guarda en ./uploads y ./data para pruebas.
 
 const express = require("express");
 const path = require("path");
@@ -38,7 +39,7 @@ if (!IS_VERCEL) {
   app.use("/uploads", express.static(UP_DIR));
 }
 
-// ===== Logger simple =====
+// ===== Logger =====
 app.use((req, res, next) => {
   const t0 = Date.now();
   console.log(`[REQ] ${req.method} ${req.originalUrl}`);
@@ -46,7 +47,7 @@ app.use((req, res, next) => {
   next();
 });
 
-// ===== Utilidades comunes =====
+// ===== Helpers generales =====
 const wantsJSON = (req) => (req.get("accept")||"").toLowerCase().includes("json") || req.xhr;
 const readJSON  = (p, fb) => { try { return JSON.parse(fs.readFileSync(p, "utf8")); } catch { return fb; } };
 const writeJSON = (p, obj) => { try { fs.writeFileSync(p, JSON.stringify(obj, null, 2), "utf8"); } catch (e) { console.warn("writeJSON fail:", e.message); } };
@@ -100,9 +101,8 @@ const normTxt = s => String(s||"").toUpperCase().replace(/[.,]/g,"").replace(/\s
 
 // ===== Vercel Blob helpers (PUBLIC por defecto) =====
 async function saveBlobFile(relPath, data, contentType = "application/octet-stream", access = (process.env.BLOB_ACCESS || "public")) {
-  // access por defecto: "public" para tokens RW configurados como públicos
   const { url } = await put(relPath, data, { access, contentType });
-  return url; // URL del Blob (pública si access="public")
+  return url;
 }
 async function loadBlobJSON(relPath, fallback) {
   try {
@@ -120,7 +120,7 @@ async function saveBlobJSON(relPath, obj, access = (process.env.BLOB_ACCESS || "
   return await saveBlobFile(relPath, body, "application/json", access);
 }
 
-// ===== Archivos base (estado en Blob; arancel local/efímero) =====
+// ===== Archivos base (persistidos en Blob); arancel local =====
 const ARANCEL_FILE       = path.join(DATA_DIR, "arancel.json");
 const ALT_ARANCEL_FILE_1 = path.join(DATA_DIR, "arancel_aduanero_2022_version_publicada_sitio_web.json");
 if (!IS_VERCEL) {
@@ -135,8 +135,11 @@ if (!IS_VERCEL) {
 }
 const STATE_FILE = path.join(DATA_DIR, "state.json");
 const CONTROL_EXPO_FILE = path.join(DATA_DIR, "control_expo.json");
+const CACHE_FILE = path.join(DATA_DIR, "cache.json");
+
 const STATE_BLOB_KEY = "data/state.json";
 const CONTROL_EXPO_BLOB_KEY = "data/control_expo.json";
+const CACHE_BLOB_KEY = "data/cache.json";
 
 async function defaultState() {
   return {
@@ -157,13 +160,29 @@ async function saveState(st) {
   if (IS_VERCEL) return await saveBlobJSON(STATE_BLOB_KEY, st);
   return writeJSON(STATE_FILE, st);
 }
-async function loadControlExpoFast() {
+async function loadControlExpo() {
   if (IS_VERCEL) return await loadBlobJSON(CONTROL_EXPO_BLOB_KEY, []);
   return readJSON(CONTROL_EXPO_FILE, []);
 }
 async function saveControlExpo(rows) {
   if (IS_VERCEL) return await saveBlobJSON(CONTROL_EXPO_BLOB_KEY, rows || []);
   return writeJSON(CONTROL_EXPO_FILE, rows || []);
+}
+async function loadCache() {
+  if (IS_VERCEL) {
+    const data = await loadBlobJSON(CACHE_BLOB_KEY, null);
+    return data || { rows: [], mtime: null };
+  }
+  return readJSON(CACHE_FILE, { rows: [], mtime: null });
+}
+async function saveCache(cacheObj) {
+  cacheObj = cacheObj || { rows: [], mtime: Date.now() };
+  cacheObj.mtime = Date.now();
+  if (IS_VERCEL) {
+    await saveBlobJSON(CACHE_BLOB_KEY, cacheObj);
+  } else {
+    writeJSON(CACHE_FILE, cacheObj);
+  }
 }
 
 // ===== Multer =====
@@ -229,9 +248,6 @@ function getStatusFor(despacho, st) {
   if (has(st.presentado)) return { key: "presentado", label: "Presentado",   cls: "dark" };
   return { key: "", label: "—", cls: "light" };
 }
-const CACHE_FILE = path.join(DATA_DIR, "cache.json");
-function loadCache() { return readJSON(CACHE_FILE, { rows: [], mtime: null }); }
-
 function mergedRowsSync(st, cache) {
   const aprobadoMap = new Map((st.aprobado || []).map(x => [String(x.despacho), x]));
   const raw = Array.isArray(cache.rows) ? cache.rows : [];
@@ -275,7 +291,7 @@ function mergedRowsSync(st, cache) {
 
 // ===== Rutas =====
 
-// salud y favicon
+// salud
 app.get("/_debug/ping", (req, res) => res.json({ ok: true, ts: Date.now(), vercel: IS_VERCEL }));
 app.get("/favicon.ico", (req, res) => res.status(404).end());
 
@@ -345,9 +361,13 @@ app.all("/arancel/data", (req, res) => {
 });
 
 // ---------- Home (Listado) ----------
+function pickClienteFromRows(rows, despacho) {
+  const it = rows.find(r => String(r.DESPACHO) === String(despacho));
+  return it ? (it.CLIENTE_NOMBRE || "") : "";
+}
 app.get("/", async (req, res) => {
   const st = await loadState();
-  const cache = loadCache();
+  const cache = await loadCache();
   let rowsAll = mergedRowsSync(st, cache);
 
   const q = (req.query.q || "").toLowerCase();
@@ -392,10 +412,6 @@ app.get("/", async (req, res) => {
 });
 
 // ---------- Flujo ----------
-function pickClienteFromRows(rows, despacho) {
-  const it = rows.find(r => String(r.DESPACHO) === String(despacho));
-  return it ? (it.CLIENTE_NOMBRE || "") : "";
-}
 function doAdvance(st, section, despacho, cliente) {
   const advance = (fromArrName, toArrName) => {
     const fromArr = st[fromArrName] || [];
@@ -417,7 +433,7 @@ function doAdvance(st, section, despacho, cliente) {
 }
 app.get("/inicio", async (req, res) => {
   const st = await loadState();
-  const cache = loadCache();
+  const cache = await loadCache();
   const rowsAll = mergedRowsSync(st, cache);
   const aprobadosSet = new Set((st.aprobado || []).map(x => String(x.despacho)));
   const assignedView = {};
@@ -453,7 +469,7 @@ app.all("/flujo/advance/:section/:despacho", async (req, res) => {
   const despacho = String(req.params.despacho || "");
   if (!section || !despacho) return res.status(400).json({ ok:false, msg:"Parámetros inválidos" });
   const st = await loadState();
-  const cache = loadCache();
+  const cache = await loadCache();
   const rowsAll = mergedRowsSync(st, cache);
   const cliente = pickClienteFromRows(rowsAll, despacho) || "";
   const ok = doAdvance(st, section, despacho, cliente);
@@ -652,7 +668,7 @@ app.get("/cargados", async (req, res) => {
     const fEtaTo = (req.query.etato || "").trim();
 
     const st = await loadState();
-    const cache = loadCache();
+    const cache = await loadCache();
     const rowsAll = mergedRowsSync(st, cache);
 
     function daysToEta(r) {
@@ -748,7 +764,7 @@ app.get("/provision", async (req, res) => {
   const from = req.query.from || "";
   const to = req.query.to || "";
   const st = await loadState();
-  const cache = loadCache();
+  const cache = await loadCache();
   let rows = mergedRowsSync(st, cache).filter(r => isProvisionClient(r.CLIENTE_NOMBRE));
   rows = rows.filter(r => {
     const hay = `${r.DESPACHO} ${r.CLIENTE_NOMBRE} ${r.EJECUTIVO_NOMBRE} ${r.pedidor_final}`.toLowerCase();
@@ -796,14 +812,12 @@ app.post("/control-expo/upload-xml", upload.single("xml"), async (req, res) => {
   try {
     if (!req.file) return res.redirect("/control-expo?err=No+se+recibio+XML");
 
-    // Persistir XML (PUBLIC)
     if (IS_VERCEL) {
       const filenameSafe = (req.file.originalname || "archivo.xml").replace(/[^a-zA-Z0-9._-]/g, "_");
       await saveBlobFile(`uploads/xml/${Date.now()}-${filenameSafe}`, req.file.buffer, "application/xml");
     }
 
-    const xmlStr = IS_VERCEL ? req.file.buffer.toString("utf8")
-                             : fs.readFileSync(req.file.path, "utf8");
+    const xmlStr = IS_VERCEL ? req.file.buffer.toString("utf8") : fs.readFileSync(req.file.path, "utf8");
     const parsed = await parseStringPromise(xmlStr, { explicitArray:false, mergeAttrs:true, trim:true });
 
     if (!isExpoXML(parsed)) {
@@ -853,38 +867,37 @@ app.post("/control-expo/upload-xml", upload.single("xml"), async (req, res) => {
   }
 });
 
-// Dispatcher /upload-xml (EXPO o Listado)
+// Dispatcher /upload-xml (EXPO o Listado) con upsert a cache.json
 app.post("/upload-xml", upload.single("xml"), async (req, res) => {
   try {
     if (!req.file) return res.status(400).send("Debes subir un XML");
 
-    // Persistir XML (PUBLIC)
+    // Persistir XML (Blob PUBLIC)
     if (IS_VERCEL) {
       const filenameSafe = (req.file.originalname || "archivo.xml").replace(/[^a-zA-Z0-9._-]/g, "_");
       await saveBlobFile(`uploads/xml/${Date.now()}-${filenameSafe}`, req.file.buffer, "application/xml");
     }
 
-    const xmlStr = IS_VERCEL ? req.file.buffer.toString("utf8")
-                             : fs.readFileSync(req.file.path, "utf8");
-
+    const xmlStr = IS_VERCEL ? req.file.buffer.toString("utf8") : fs.readFileSync(req.file.path, "utf8");
     const parsed = await parseStringPromise(xmlStr, { explicitArray:false, mergeAttrs:true, trim:true });
 
     const tipo = String(req.query.tipo || "").toLowerCase();
     const forceExpo = tipo === "expo";
     const forceListado = tipo === "listado";
 
+    // Si detecta EXPO, delega al handler de EXPO
     if (forceExpo || (!forceListado && isExpoXML(parsed))) {
-      // Reutiliza handler de EXPO
       req.url = "/control-expo/upload-xml";
       return app._router.handle({ ...req, url: "/control-expo/upload-xml", method: "POST", file: req.file }, res, ()=>{});
     }
 
-    // ---- Listado/Importación (aprobados) ----
+    // === Listado/Importación de aprobados + upsert en cache ===
     const parsed2 = await parseStringPromise(xmlStr, { explicitArray:false, trim:true, mergeAttrs:true });
     const list = parsed2?.Listado?.Registro
       ? (Array.isArray(parsed2.Listado.Registro) ? parsed2.Listado.Registro : [parsed2.Listado.Registro])
       : [];
 
+    // Aprobados → state.aprobado (con KPI)
     const aprobados = list.map(r => {
       const DESPACHO = r.DESPACHO || "";
       const CLIENTE  = r.CLIENTE_NOMBRE || "";
@@ -917,7 +930,41 @@ app.post("/upload-xml", upload.single("xml"), async (req, res) => {
     st.kpiPedidorHoy = kpiPedidorHoy;
 
     await saveState(st);
-    return res.redirect("/inicio?ok=Listado+procesado+por+/upload-xml");
+
+    // === ACTUALIZAR CACHE CON FILAS BÁSICAS DEL LISTADO ===
+    try {
+      const cache = await loadCache();
+      const rows = Array.isArray(cache.rows) ? cache.rows : [];
+      const byDesp = new Map(rows.map(r => [String(r.DESPACHO ?? r.despacho ?? "").trim(), r]));
+
+      for (const r of list) {
+        const DESPACHO = String(r.DESPACHO || r.Id || r.ID || "").trim();
+        if (!DESPACHO) continue;
+
+        const prev = byDesp.get(DESPACHO) || {};
+
+        const rowNew = {
+          ...prev,
+          DESPACHO,
+          CLIENTE_NOMBRE:   (r.CLIENTE_NOMBRE   || prev.CLIENTE_NOMBRE   || "").trim(),
+          ADUANA_NOMBRE:    (r.ADUANA_NOMBRE    || prev.ADUANA_NOMBRE    || "").trim(),
+          OPERACION_NOMBRE: (r.OPERACION_NOMBRE || prev.OPERACION_NOMBRE || "").trim(),
+          EJECUTIVO_NOMBRE: (r.EJECUTIVO_NOMBRE || prev.EJECUTIVO_NOMBRE || "").trim(),
+          PEDIDOR_NOMBRE:   (r.PEDIDOR_NOMBRE   || prev.PEDIDOR_NOMBRE   || "").trim(),
+          FECHA_INGRESO:    (r.FECHA_INGRESO || r.FECHA || prev.FECHA_INGRESO || "").trim(),
+          FECHA_ETA:        (r.FECHA_ETA     || r.ETA   || prev.FECHA_ETA     || "").trim()
+        };
+
+        byDesp.set(DESPACHO, rowNew);
+      }
+
+      const rowsNew = Array.from(byDesp.values());
+      await saveCache({ rows: rowsNew, mtime: Date.now() });
+    } catch (e) {
+      console.warn("[UPLOAD-XML] No se pudo actualizar cache.json:", e.message);
+    }
+
+    return res.redirect("/inicio?ok=Listado+procesado+y+cache+actualizado");
   } catch (err) {
     console.error("upload-xml dispatcher error:", err);
     return res.status(500).send("Error procesando /upload-xml");
@@ -932,12 +979,12 @@ app.get("/control-expo", async (req, res) => {
   const fTo       = String(req.query.venc_to   || "").trim();
   const fUrg      = String(req.query.urgencia  || "all"); // all|vencido|proximo|ok
 
-  let rows = await loadControlExpoFast();
+  let rows = await loadControlExpo();
   const soloSinLegal = (req.query.sin_legalizacion ?? "1") !== "0";
   if (soloSinLegal) rows = rows.filter(r => !String(r.ACEPTA2_ISO || "").trim());
 
   const st = await loadState();
-  const cache = loadCache();
+  const cache = await loadCache();
   const idxRows = mergedRowsSync(st, cache);
   const today0 = new Date(); today0.setHours(0,0,0,0);
 
@@ -1005,7 +1052,7 @@ app.get("/clasificacion", (_, res) => res.render("clasificacion"));
 // ---------- Reporte Excel ----------
 app.get("/despachos/reporte/xlsx", async (req, res) => {
   const st = await loadState();
-  const cache = loadCache();
+  const cache = await loadCache();
   const rows = mergedRowsSync(st, cache);
   const wb = xlsx.utils.book_new();
   const ws = xlsx.utils.json_to_sheet(rows);
@@ -1053,7 +1100,7 @@ function listenWithRetry(startPort = parseInt(process.env.PORT || "3000", 10), m
 }
 
 if (IS_VERCEL) {
-  module.exports = app;         // para @vercel/node
+  module.exports = app; // para @vercel/node
 } else {
   listenWithRetry();
 }
