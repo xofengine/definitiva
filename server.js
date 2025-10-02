@@ -1,8 +1,4 @@
-// server.js — Express + Vercel Blob (PUBLIC) con cache/state/control_expo persistentes
-// - XML/PDF -> Blob (public)
-// - state.json, control_expo.json y cache.json en Blob
-// - /upload-xml (Listado) parsea <Listado><Registro> con campos del XML real y hace upsert a cache
-// - En Vercel exporta la app; en local escucha puerto
+// server.js — Express + Vercel Blob (PUBLIC) con Listado/EXPO + cache/state/control_expo persistentes
 
 const express = require("express");
 const path = require("path");
@@ -14,13 +10,13 @@ const multer = require("multer");
 const { PDFDocument } = require("pdf-lib");
 const http = require("http");
 const { DateTime } = require("luxon");
-const { put, get } = require("@vercel/blob");
+const { put, list } = require("@vercel/blob");
 
-// ===== Entorno =====
+// ================== Entorno ==================
 const IS_VERCEL = !!process.env.VERCEL;
 const TZ = "America/Santiago";
 
-// ===== App =====
+// ================== App ==================
 const app = express();
 app.set("view engine", "ejs");
 app.set("views", path.join(__dirname, "views"));
@@ -31,7 +27,6 @@ app.use(compression());
 app.use("/static", express.static(path.join(__dirname, "public")));
 app.use((req, res, next) => { res.locals.path = req.path || "/"; next(); });
 
-// En local servimos /uploads desde disco. En Vercel todo va a Blob.
 const DATA_DIR = IS_VERCEL ? "/tmp/data"    : path.join(__dirname, "data");
 const UP_DIR   = IS_VERCEL ? "/tmp/uploads" : path.join(__dirname, "uploads");
 if (!IS_VERCEL) {
@@ -40,7 +35,7 @@ if (!IS_VERCEL) {
   app.use("/uploads", express.static(UP_DIR));
 }
 
-// ===== Logger =====
+// ================== Logger ==================
 app.use((req, res, next) => {
   const t0 = Date.now();
   console.log(`[REQ] ${req.method} ${req.originalUrl}`);
@@ -48,97 +43,53 @@ app.use((req, res, next) => {
   next();
 });
 
-// ===== Utils =====
+// ================== Utils ==================
 const wantsJSON = (req) => (req.get("accept")||"").toLowerCase().includes("json") || req.xhr;
 const readJSON  = (p, fb) => { try { return JSON.parse(fs.readFileSync(p, "utf8")); } catch { return fb; } };
 const writeJSON = (p, obj) => { try { fs.writeFileSync(p, JSON.stringify(obj, null, 2), "utf8"); } catch (e) { console.warn("writeJSON fail:", e.message); } };
-const normTxt   = s => String(s||"").toUpperCase().replace(/[.,]/g,"").replace(/\s+/g," ").trim();
-
+const unique = (values) => Array.from(new Set(values.filter(Boolean))).sort((a, b) => String(a).localeCompare(String(b), "es"));
 function parseCLDate(str) {
   if (!str) return null;
   if (str instanceof Date) return Number.isNaN(str.getTime()) ? null : str;
-  const s = String(str).trim();
-  const d0 = new Date(s);
-  if (!Number.isNaN(d0.getTime())) return d0;
+  const s = String(str).trim(); const d0 = new Date(s); if (!Number.isNaN(d0.getTime())) return d0;
   let m = s.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})(?:\s+(\d{1,2}):(\d{2}))?$/);
-  if (m) {
-    const dd=+m[1], mm=+m[2]-1, yyyy=+m[3], HH=m[4]?+m[4]:0, MM=m[5]?+m[5]:0;
-    const d = new Date(yyyy, mm, dd, HH, MM, 0, 0);
-    return Number.isNaN(d.getTime()) ? null : d;
-  }
+  if (m) { const dd=+m[1], mm=+m[2]-1, yyyy=+m[3], HH=m[4]?+m[4]:0, MM=m[5]?+m[5]:0; const d = new Date(yyyy, mm, dd, HH, MM, 0, 0); return Number.isNaN(d.getTime()) ? null : d; }
   m = s.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{2})$/);
-  if (m) {
-    const dd=+m[1], mm=+m[2]-1, yy=+m[3], yyyy = yy + (yy >= 70 ? 1900 : 2000);
-    const d = new Date(yyyy, mm, dd);
-    return Number.isNaN(d.getTime()) ? null : d;
-  }
+  if (m) { const dd=+m[1], mm=+m[2]-1, yy=+m[3], yyyy = yy + (yy >= 70 ? 1900 : 2000); const d = new Date(yyyy, mm, dd); return Number.isNaN(d.getTime()) ? null : d; }
   return null;
 }
-function fmtDMY(dLike) {
-  const d = (dLike instanceof Date) ? dLike : parseCLDate(dLike);
-  if (!d) return "";
-  const dd = String(d.getDate()).padStart(2,"0");
-  const mm = String(d.getMonth()+1).padStart(2,"0");
-  const yy = d.getFullYear();
-  return `${dd}-${mm}-${yy}`;
-}
-function isTodayTS(ts) {
-  if (!ts && ts !== 0) return false;
-  const d = DateTime.fromMillis(Number(ts), { zone: TZ });
-  const now = DateTime.now().setZone(TZ);
-  return d.isValid && d.hasSame(now, "day") && d.hasSame(now, "month") && d.hasSame(now, "year");
-}
-function unique(values) {
-  return Array.from(new Set(values.filter(Boolean)))
-    .sort((a, b) => String(a).localeCompare(String(b), "es"));
-}
-function toISOFromFechaHora(fechaYMD, horaHMS) {
-  const f = (fechaYMD || "").trim();
-  const h = (horaHMS || "").trim() || "00:00:00";
-  if (!f) return "";
-  const dt = DateTime.fromFormat(`${f} ${h}`, "yyyy-LL-dd HH:mm:ss", { zone: TZ });
-  return dt.isValid ? dt.toISO() : "";
-}
+function fmtDMY(dLike) { const d = (dLike instanceof Date) ? dLike : parseCLDate(dLike); if (!d) return ""; return `${String(d.getDate()).padStart(2,"0")}-${String(d.getMonth()+1).padStart(2,"0")}-${d.getFullYear()}`; }
+function isTodayTS(ts) { if (!ts && ts !== 0) return false; const d = DateTime.fromMillis(Number(ts), { zone: TZ }); const now = DateTime.now().setZone(TZ); return d.isValid && d.hasSame(now, "day") && d.hasSame(now, "month") && d.hasSame(now, "year"); }
+function toISOFromFechaHora(fechaYMD, horaHMS) { const f=(fechaYMD||"").trim(); const h=(horaHMS||"").trim() || "00:00:00"; if(!f) return ""; const dt = DateTime.fromFormat(`${f} ${h}`, "yyyy-LL-dd HH:mm:ss", { zone: TZ }); return dt.isValid ? dt.toISO() : ""; }
 
-// ===== Blob helpers (PUBLIC por defecto) =====
+// ================== Blob helpers (PUBLIC) ==================
+async function blobPublicUrl(key) {
+  const out = await list({ prefix: key });
+  const exact = out?.blobs?.find(b => b.pathname === key);
+  return (exact || out?.blobs?.[0])?.url || null;
+}
 async function saveBlobFile(relPath, data, contentType = "application/octet-stream", access = (process.env.BLOB_ACCESS || "public")) {
   const { url } = await put(relPath, data, { access, contentType });
   return url;
 }
 async function loadBlobJSON(relPath, fallback) {
   try {
-    const file = await get(relPath);
-    const res = await fetch(file.url);
-    if (!res.ok) throw new Error(`GET ${relPath} ${res.status}`);
+    const url = await blobPublicUrl(relPath);
+    if (!url) return fallback;
+    const res = await fetch(url);
+    if (!res.ok) return fallback;
     return await res.json();
-  } catch {
-    return fallback;
-  }
+  } catch { return fallback; }
 }
 async function saveBlobJSON(relPath, obj, access = (process.env.BLOB_ACCESS || "public")) {
   const body = JSON.stringify(obj, null, 2);
   return await saveBlobFile(relPath, body, "application/json", access);
 }
 
-// ===== Archivos base (solo local para arancel) =====
-const ARANCEL_FILE       = path.join(DATA_DIR, "arancel.json");
-const ALT_ARANCEL_FILE_1 = path.join(DATA_DIR, "arancel_aduanero_2022_version_publicada_sitio_web.json");
-if (!IS_VERCEL) {
-  if (!fs.existsSync(ARANCEL_FILE)) {
-    if (fs.existsSync(ALT_ARANCEL_FILE_1)) {
-      try { fs.writeFileSync(ARANCEL_FILE, fs.readFileSync(ALT_ARANCEL_FILE_1, "utf8"), "utf8"); }
-      catch (e) { writeJSON(ARANCEL_FILE, { headers: [], rows: [] }); }
-    } else {
-      writeJSON(ARANCEL_FILE, { headers: [], rows: [] });
-    }
-  }
-}
-
-// Persistentes en Blob
+// ================== Persistentes ==================
 const STATE_FILE = path.join(DATA_DIR, "state.json");
 const CONTROL_EXPO_FILE = path.join(DATA_DIR, "control_expo.json");
 const CACHE_FILE = path.join(DATA_DIR, "cache.json");
-
 const STATE_BLOB_KEY = "data/state.json";
 const CONTROL_EXPO_BLOB_KEY = "data/control_expo.json";
 const CACHE_BLOB_KEY = "data/cache.json";
@@ -151,10 +102,7 @@ async function defaultState() {
   };
 }
 async function loadState() {
-  if (IS_VERCEL) {
-    const st = await loadBlobJSON(STATE_BLOB_KEY, null);
-    return st || await defaultState();
-  }
+  if (IS_VERCEL) return (await loadBlobJSON(STATE_BLOB_KEY, null)) || await defaultState();
   return readJSON(STATE_FILE, await defaultState());
 }
 async function saveState(st) {
@@ -171,74 +119,50 @@ async function saveControlExpo(rows) {
   return writeJSON(CONTROL_EXPO_FILE, rows || []);
 }
 async function loadCache() {
-  if (IS_VERCEL) {
-    const data = await loadBlobJSON(CACHE_BLOB_KEY, null);
-    return data || { rows: [], mtime: null };
-  }
+  if (IS_VERCEL) return (await loadBlobJSON(CACHE_BLOB_KEY, null)) || { rows: [], mtime: null };
   return readJSON(CACHE_FILE, { rows: [], mtime: null });
 }
 async function saveCache(cacheObj) {
   const out = cacheObj || { rows: [], mtime: Date.now() };
   out.mtime = Date.now();
-  if (IS_VERCEL) {
-    await saveBlobJSON(CACHE_BLOB_KEY, out);
-  } else {
-    writeJSON(CACHE_FILE, out);
-  }
+  if (IS_VERCEL) return await saveBlobJSON(CACHE_BLOB_KEY, out);
+  return writeJSON(CACHE_FILE, out);
 }
 
-// ===== Multer =====
+// ================== Multer ==================
 let upload;
 if (IS_VERCEL) {
   upload = multer({ storage: multer.memoryStorage() });
 } else {
   const storage = multer.diskStorage({
     destination: (_, __, cb) => cb(null, UP_DIR),
-    filename:   (_, file, cb) => {
-      const safe = (file.originalname || "archivo").replace(/[^a-zA-Z0-9._-]/g, "_");
-      cb(null, `${Date.now()}-${safe}`);
-    }
+    filename:   (_, file, cb) => cb(null, `${Date.now()}-${(file.originalname||"archivo").replace(/[^a-zA-Z0-9._-]/g,"_")}`)
   });
   upload = multer({ storage });
 }
 
-// ===== Arancel helpers =====
-function loadArancel() {
-  if (IS_VERCEL) {
-    try { return JSON.parse(fs.readFileSync(ARANCEL_FILE, "utf8")); } catch { return { headers: [], rows: [] }; }
-  } else {
-    try {
-      const raw = JSON.parse(fs.readFileSync(ARANCEL_FILE, "utf8"));
-      if (raw && Array.isArray(raw.headers) && Array.isArray(raw.rows)) return raw;
-      if (Array.isArray(raw)) return { headers: [], rows: raw };
-      if (raw && Array.isArray(raw.data)) return { headers: raw.headers || [], rows: raw.data };
-      return { headers: [], rows: [] };
-    } catch { return { headers: [], rows: [] }; }
+// ================== Arancel (simple) ==================
+const ARANCEL_FILE       = path.join(DATA_DIR, "arancel.json");
+const ALT_ARANCEL_FILE_1 = path.join(DATA_DIR, "arancel_aduanero_2022_version_publicada_sitio_web.json");
+if (!IS_VERCEL) {
+  if (!fs.existsSync(ARANCEL_FILE)) {
+    if (fs.existsSync(ALT_ARANCEL_FILE_1)) {
+      try { fs.writeFileSync(ARANCEL_FILE, fs.readFileSync(ALT_ARANCEL_FILE_1, "utf8"), "utf8"); }
+      catch { writeJSON(ARANCEL_FILE, { headers: [], rows: [] }); }
+    } else writeJSON(ARANCEL_FILE, { headers: [], rows: [] });
   }
 }
-const hsDigits = (s)=> String(s ?? "").replace(/\D/g,"");
-const looksLikeHSAny = (v)=>{ const d=hsDigits(v); return d.length>=2 && d.length<=8; };
-const formatHS = (raw)=>{
-  const d = hsDigits(raw); if(!d) return "";
-  if(d.length===8) return `${d.slice(0,4)}.${d.slice(4)}`;
-  if(d.length===6) return `${d.slice(0,4)}.${d.slice(4)}`;
-  if(d.length===4) return `${d.slice(0,2)}.${d.slice(2)}`;
-  return d;
-};
-const findCodeInRow = (row)=> {
-  const arr = Array.isArray(row)?row:[];
-  for (const v of arr) { if (looksLikeHSAny(v)) return formatHS(v); }
-  return "";
-};
-const pickGlosaInRow = (row, headers)=>{
-  const arr = Array.isArray(row)?row:[]; const h = Array.isArray(headers)?headers:[];
-  const gIdx = h.findIndex(t => /(glosa|descrip)/i.test(String(t)));
-  if(gIdx>=0 && String(arr[gIdx]||"").trim()) return String(arr[gIdx]);
-  for(const v of arr){ if(!looksLikeHSAny(v) && String(v||"").trim()) return String(v); }
-  return "";
-};
+function loadArancel() {
+  try {
+    const raw = JSON.parse(fs.readFileSync(ARANCEL_FILE, "utf8"));
+    if (raw && Array.isArray(raw.headers) && Array.isArray(raw.rows)) return raw;
+    if (Array.isArray(raw)) return { headers: [], rows: raw };
+    if (raw && Array.isArray(raw.data)) return { headers: raw.headers || [], rows: raw.data };
+    return { headers: [], rows: [] };
+  } catch { return { headers: [], rows: [] }; }
+}
 
-// ===== Merge/cache helpers =====
+// ================== Merge de filas (cache + state) ==================
 function getStatusFor(despacho, st) {
   const d = String(despacho);
   const has = (arr) => Array.isArray(arr) && arr.some(x => String(x.despacho) === d);
@@ -270,12 +194,12 @@ function mergedRowsSync(st, cache) {
       FECHA_INGRESO: srcIngreso, FECHA_ETA: srcEta,
       FECHA_INGRESO_DATE: dIngreso, FECHA_INGRESO_FMT: fmtDMY(dIngreso),
       FECHA_ETA_DATE: dEta, FECHA_ETA_FMT: fmtDMY(dEta),
-      CLIENTE_NOMBRE:   r.CLIENTE_NOMBRE   ?? r.cliente   ?? r.Cliente   ?? "",
-      ADUANA_NOMBRE:    r.ADUANA_NOMBRE    ?? r.aduana    ?? "",
-      OPERACION_NOMBRE: r.OPERACION_NOMBRE ?? r.operacion ?? "",
-      EJECUTIVO_NOMBRE: r.EJECUTIVO_NOMBRE ?? r.ejecutivo ?? "",
-      PEDIDOR_NOMBRE:   r.PEDIDOR_NOMBRE   ?? r.pedidor   ?? "",
-      pedidor_final: (extra.pedidor || r.PEDIDOR_NOMBRE || r.pedidor || "").trim(),
+      CLIENTE_NOMBRE:   r.CLIENTE_NOMBRE   ?? "",
+      ADUANA_NOMBRE:    r.ADUANA_NOMBRE    ?? "",
+      OPERACION_NOMBRE: r.OPERACION_NOMBRE ?? "",
+      EJECUTIVO_NOMBRE: r.EJECUTIVO_NOMBRE ?? "",
+      PEDIDOR_NOMBRE:   r.PEDIDOR_NOMBRE   ?? "",
+      pedidor_final: (extra.pedidor || r.PEDIDOR_NOMBRE || "").trim(),
       estadoKey: s.key, estadoLbl: s.label, estadoCls: s.cls, estadoTxt: !!s.key,
       aprobado: !!ap,
       aprobadoDateISO: ap?.fecha || "",
@@ -291,84 +215,55 @@ function mergedRowsSync(st, cache) {
   return rows;
 }
 
-// ===== Rutas Debug =====
-app.get("/_debug/ping", (req, res) => res.json({ ok: true, ts: Date.now(), vercel: IS_VERCEL }));
+// ================== Debug ==================
+app.get("/_debug/env", (req, res) => {
+  res.json({ hasToken: !!process.env.BLOB_READ_WRITE_TOKEN, access: process.env.BLOB_ACCESS || "public" });
+});
 app.get("/_debug/cache", async (req, res) => {
   const c = await loadCache();
   res.json({ ok: true, count: (c.rows||[]).length, sample: (c.rows||[])[0] || null, mtime: c.mtime || null });
 });
-app.get("/_debug/state", async (req, res) => {
-  const st = await loadState();
-  res.json({ ok: true, aprobado: (st.aprobado||[]).length, hasPdfs: Object.keys(st.pdfs || {}).length });
+app.get("/_debug/blob-cache", async (req, res) => {
+  try {
+    const out = await list({ prefix: "data/cache.json" });
+    res.json({
+      ok: (out?.blobs?.length || 0) > 0,
+      count: out?.blobs?.length || 0,
+      items: (out?.blobs || []).map(b => ({ pathname: b.pathname, size: b.size, uploadedAt: b.uploadedAt, url: b.url }))
+    });
+  } catch (e) {
+    res.json({ ok: false, err: e.message });
+  }
 });
+app.get("/_debug/blob-cache-raw", async (req, res) => {
+  try {
+    const url = await blobPublicUrl("data/cache.json");
+    if (!url) return res.status(404).json({ ok:false, err:"not found" });
+    const r = await fetch(url);
+    const text = await r.text();
+    res.setHeader("Content-Type", "application/json; charset=utf-8");
+    res.send(text);
+  } catch (e) {
+    res.status(500).json({ ok:false, err:e.message });
+  }
+});
+app.get("/_debug/merged", async (req, res) => {
+  const st = await loadState();
+  const cache = await loadCache();
+  const rows = mergedRowsSync(st, cache);
+  res.json({ ok:true, total: rows.length, sample: rows[0] || null });
+});
+app.get("/_debug/ping", (req, res) => res.json({ ok:true, ts: Date.now(), vercel: IS_VERCEL }));
 app.get("/favicon.ico", (req, res) => res.status(404).end());
 
-// Styles fallback
-app.get("/static/css/styles.css", (req, res) => {
-  const p1 = path.join(__dirname, "public", "css", "styles.css");
-  const p2 = path.join(__dirname, "public", "styles.css");
-  if (fs.existsSync(p1)) return res.sendFile(p1);
-  if (fs.existsSync(p2)) return res.sendFile(p2);
-  return res.status(404).send("styles.css no encontrado");
-});
-
-// ---------- Arancel ----------
+// ================== Arancel ==================
 app.get("/arancel", (req, res) => {
   const data = loadArancel();
   const hasData = (data.headers || []).length && (data.rows || []).length;
-  res.render("arancel", {
-    hasData,
-    headers: data.headers,
-    count: (data.rows || []).length,
-    ok: req.query.ok || "",
-    err: req.query.err || ""
-  });
-});
-app.all("/arancel/data", (req, res) => {
-  try {
-    const q     = String(req.query.q ?? "").trim();
-    const desc  = String(req.query.desc ?? "").trim();
-    const sort  = String(req.query.sort ?? "asc").toLowerCase();
-    const page  = Math.max(1, parseInt(req.query.page ?? "1", 10) || 1);
-    const per   = Math.max(1, Math.min(500, parseInt(req.query.per ?? "100", 10) || 100));
-
-    const data    = loadArancel();
-    const headers = Array.isArray(data.headers) ? data.headers : [];
-    const rowsAll = Array.isArray(data.rows)    ? data.rows    : [];
-
-    let items = rowsAll.map(row => ({ code: findCodeInRow(row), glosa: pickGlosaInRow(row, headers) }));
-    const qDigits = hsDigits(q);
-    const qText   = desc.toUpperCase();
-
-    items = items.filter(({code, glosa}) => {
-      const okPart = qDigits ? hsDigits(code).startsWith(qDigits) : true;
-      const okDesc = qText ? String(glosa).toUpperCase().includes(qText) : true;
-      return okPart && okDesc && (!qDigits || !!code);
-    });
-
-    items.sort((a,b) => {
-      const A = hsDigits(a.code), B = hsDigits(b.code);
-      return sort === "desc" ? B.localeCompare(A,"es") : A.localeCompare(B,"es");
-    });
-
-    const total = items.length;
-    const totalPages = Math.max(1, Math.ceil(total/per));
-    const pageItems = items.slice((page-1)*per, (page-1)*per + per);
-
-    res.json({
-      ok: true,
-      headers: ["Código del S.A.", "Glosa"],
-      rows: pageItems.map(it => [it.code, it.glosa]),
-      total, page, totalPages,
-      partIdx: 0, descIdx: 1
-    });
-  } catch (e) {
-    console.error("❌ /arancel/data error:", e);
-    res.json({ ok:true, headers:["Código del S.A.","Glosa"], rows:[], total:0, page:1, totalPages:1, partIdx:0, descIdx:1 });
-  }
+  res.render("arancel", { hasData, headers: data.headers, count: (data.rows || []).length, ok: req.query.ok || "", err: req.query.err || "" });
 });
 
-// ---------- Home (Listado) ----------
+// ================== Home (Listado) ==================
 app.get("/", async (req, res) => {
   const st = await loadState();
   const cache = await loadCache();
@@ -414,22 +309,8 @@ app.get("/", async (req, res) => {
     fCliente, fAduana, fFrom, fTo, fPedidor, fEjecutivo
   });
 });
-app.get("/_debug/blob-cache", async (req, res) => {
-  try {
-    const key = "data/cache.json";
-    const file = await get(key);
-    res.json({ ok: !!file?.url, key, url: file?.url || null });
-  } catch (e) {
-    res.json({ ok: false, err: e.message });
-  }
-});
-app.get("/_debug/env", (req, res) => {
-  const hasToken = !!process.env.BLOB_READ_WRITE_TOKEN;
-  const access = process.env.BLOB_ACCESS || "public";
-  res.json({ hasToken, access });
-});
 
-// ---------- Flujo ----------
+// ================== Flujo mínimo ==================
 function pickClienteFromRows(rows, despacho) {
   const it = rows.find(r => String(r.DESPACHO) === String(despacho));
   return it ? (it.CLIENTE_NOMBRE || "") : "";
@@ -490,18 +371,15 @@ app.all("/flujo/advance/:section/:despacho", async (req, res) => {
   const section  = String(req.params.section || "").toLowerCase();
   const despacho = String(req.params.despacho || "");
   if (!section || !despacho) return res.status(400).json({ ok:false, msg:"Parámetros inválidos" });
-  const st = await loadState();
-  const cache = await loadCache();
-  const rowsAll = mergedRowsSync(st, cache);
-  const cliente = pickClienteFromRows(rowsAll, despacho) || "";
-  const ok = doAdvance(st, section, despacho, cliente);
+  const st = await loadState(); const cache = await loadCache(); const rows = mergedRowsSync(st, cache);
+  const ok = doAdvance(st, section, despacho, pickClienteFromRows(rows, despacho) || "");
   if (!ok) return res.status(400).json({ ok:false, msg:"Sección desconocida" });
   await saveState(st);
   if (req.method === "GET" && !wantsJSON(req)) return res.redirect("/inicio");
   return res.json({ ok: true });
 });
 
-// ---------- PDFs y archivos auxiliares ----------
+// ================== PDFs ==================
 app.post("/upload/:despacho", upload.single("pdf"), async (req, res) => {
   const { despacho } = req.params;
   let url;
@@ -528,11 +406,9 @@ app.get("/pdf/view/:despacho", async (req, res) => {
   return res.redirect(p);
 });
 
-// ---------- CONTROL EXPO (carga y vista) ----------
+// ================== CONTROL EXPO (carga simple) ==================
 function toISODateOnly(s) {
-  const d = parseCLDate(s); if (!d) return "";
-  const y = d.getFullYear(), m = String(d.getMonth()+1).padStart(2,'0'), dd = String(d.getDate()).padStart(2,'0');
-  return `${y}-${m}-${dd}`;
+  const d = parseCLDate(s); if (!d) return ""; const y = d.getFullYear(), m = String(d.getMonth()+1).padStart(2,'0'), dd = String(d.getDate()).padStart(2,'0'); return `${y}-${m}-${dd}`;
 }
 function fmtDMYsafe(s) { const d = parseCLDate(s); return d ? fmtDMY(d) : ""; }
 function hasAnyKeyDeep(obj, keys) {
@@ -559,13 +435,10 @@ app.post("/control-expo/upload-xml", upload.single("xml"), async (req, res) => {
       const filenameSafe = (req.file.originalname || "archivo.xml").replace(/[^a-zA-Z0-9._-]/g, "_");
       await saveBlobFile(`uploads/xml/${Date.now()}-${filenameSafe}`, req.file.buffer, "application/xml");
     }
-    const xmlStr = IS_VERCEL ? req.file.buffer.toString("utf8")
-                             : fs.readFileSync(req.file.path, "utf8");
+    const xmlStr = IS_VERCEL ? req.file.buffer.toString("utf8") : fs.readFileSync(req.file.path, "utf8");
     const parsed = await parseStringPromise(xmlStr, { explicitArray:false, mergeAttrs:true, trim:true });
 
-    if (!isExpoXML(parsed)) {
-      return res.redirect("/control-expo?err=Este+XML+no+parece+de+EXPO.+Usa+/upload-xml");
-    }
+    if (!isExpoXML(parsed)) return res.redirect("/control-expo?err=Este+XML+no+parece+de+EXPO.+Usa+/upload-xml");
 
     const list =
       parsed?.Listado?.Registro ? (Array.isArray(parsed.Listado.Registro) ? parsed.Listado.Registro : [parsed.Listado.Registro]) :
@@ -606,7 +479,7 @@ app.post("/control-expo/upload-xml", upload.single("xml"), async (req, res) => {
   }
 });
 
-// ---------- Dispatcher /upload-xml (EXPO o LISTADO) ----------
+// ================== Dispatcher /upload-xml (EXPO o LISTADO) ==================
 app.post("/upload-xml", upload.single("xml"), async (req, res) => {
   try {
     if (!req.file) return res.status(400).send("Debes subir un XML");
@@ -614,37 +487,34 @@ app.post("/upload-xml", upload.single("xml"), async (req, res) => {
       const filenameSafe = (req.file.originalname || "archivo.xml").replace(/[^a-zA-Z0-9._-]/g, "_");
       await saveBlobFile(`uploads/xml/${Date.now()}-${filenameSafe}`, req.file.buffer, "application/xml");
     }
-    const xmlStr = IS_VERCEL ? req.file.buffer.toString("utf8")
-                             : fs.readFileSync(req.file.path, "utf8");
+    const xmlStr = IS_VERCEL ? req.file.buffer.toString("utf8") : fs.readFileSync(req.file.path, "utf8");
     const parsed0 = await parseStringPromise(xmlStr, { explicitArray:false, trim:true, mergeAttrs:true });
 
     const tipo = String(req.query.tipo || "").toLowerCase();
     const forceExpo = tipo === "expo";
     const forceListado = tipo === "listado";
     if (forceExpo || (!forceListado && isExpoXML(parsed0))) {
-      // delega a /control-expo/upload-xml
+      // Derivar a EXPO
       req.url = "/control-expo/upload-xml";
       return app._router.handle({ ...req, url: "/control-expo/upload-xml", method: "POST", file: req.file }, res, ()=>{});
     }
 
-    // ---- LISTADO concreto: <Listado><Registro> con los campos del XML que enviaste ----
-    const parsed = parsed0; // ya parseado
-    const registros = Array.isArray(parsed?.Listado?.Registro)
-      ? parsed.Listado.Registro
-      : (parsed?.Listado?.Registro ? [parsed.Listado.Registro] : []);
+    // ---- LISTADO real: <Listado><Registro> ----
+    const registros = Array.isArray(parsed0?.Listado?.Registro)
+      ? parsed0.Listado.Registro
+      : (parsed0?.Listado?.Registro ? [parsed0.Listado.Registro] : []);
 
     if (!registros.length) {
       console.warn("[UPLOAD-XML] Listado vacío o estructura no reconocida");
       return res.redirect("/?error=XML+de+Listado+sin+registros");
     }
 
-    // Helpers de lectura segura
     const val = (o, k, def = "") => {
       const v = o?.[k];
       return (v === undefined || v === null) ? def : String(v).trim();
     };
 
-    // 1) Upsert en cache.json con los campos del XML de Listado real
+    // 1) Upsert a cache.json
     const now = Date.now();
     const filas = registros.map(r => {
       const DESPACHO         = val(r, "DESPACHO", "");
@@ -656,21 +526,10 @@ app.post("/upload-xml", upload.single("xml"), async (req, res) => {
       const PEDIDOR_NOMBRE   = val(r, "PEDIDOR_NOMBRE");
       const FECHA_INGRESO    = val(r, "FECHA_INGRESO");
       const FECHA_ETA        = val(r, "FECHA_ETA");
-
-      return {
-        DESPACHO,
-        CLIENTE_NOMBRE,
-        ADUANA_NOMBRE,
-        OPERACION_NOMBRE,
-        EJECUTIVO_NOMBRE,
-        PEDIDOR_NOMBRE,
-        FECHA_INGRESO,
-        FECHA_ETA,
-        __ts: now
-      };
+      return { DESPACHO, CLIENTE_NOMBRE, ADUANA_NOMBRE, OPERACION_NOMBRE, EJECUTIVO_NOMBRE, PEDIDOR_NOMBRE, FECHA_INGRESO, FECHA_ETA, __ts: now };
     }).filter(Boolean);
 
-    const cachePrev = await loadCache(); // { rows:[], mtime:... }
+    const cachePrev = await loadCache();
     const map = new Map((cachePrev.rows || []).map(r => [String(r.DESPACHO), r]));
     for (const row of filas) {
       const key = String(row.DESPACHO);
@@ -680,11 +539,10 @@ app.post("/upload-xml", upload.single("xml"), async (req, res) => {
     await saveCache(cacheNext);
     console.log(`[UPLOAD-XML] Listado: ${filas.length} filas nuevas; cache total=${cacheNext.rows.length}`);
 
-    // 2) Aprobados/KPI (si viene FECHA_ACEPTACION + HORA_ACEPTACION)
+    // 2) Aprobados/KPI si trae FECHA_ACEPTACION + HORA_ACEPTACION
     const st = await loadState();
     st.aprobado = Array.isArray(st.aprobado) ? st.aprobado : [];
     const byId = new Map(st.aprobado.map(x => [String(x.despacho), x]));
-
     for (const r of registros) {
       const d = val(r, "DESPACHO", "");
       if (!d) continue;
@@ -694,32 +552,14 @@ app.post("/upload-xml", upload.single("xml"), async (req, res) => {
       const iso = toISOFromFechaHora(fecha, hora);
       if (!iso) continue;
       const ts = DateTime.fromISO(iso, { zone: TZ }).toMillis();
-
-      const payload = {
-        despacho: d,
-        cliente: val(r, "CLIENTE_NOMBRE", ""),
-        pedidor: val(r, "PEDIDOR_NOMBRE", ""),
-        ts,
-        fecha: iso
-      };
+      const payload = { despacho: d, cliente: val(r, "CLIENTE_NOMBRE", ""), pedidor: val(r, "PEDIDOR_NOMBRE", ""), ts, fecha: iso };
       const prev = byId.get(d);
       if (!prev || (ts || 0) > (prev.ts || 0)) byId.set(d, payload);
     }
     st.aprobado = Array.from(byId.values()).sort((a,b)=>(b.ts||0)-(a.ts||0));
-
-    // KPI del día
-    const kpiPedidorHoy = {};
-    let kpiHoy = 0;
-    for (const a of st.aprobado) {
-      if (isTodayTS(a.ts)) {
-        kpiHoy += 1;
-        const key = (a.pedidor || "SIN PEDIDOR").toUpperCase();
-        kpiPedidorHoy[key] = (kpiPedidorHoy[key] || 0) + 1;
-      }
-    }
-    st.kpiHoy = kpiHoy;
-    st.kpiPedidorHoy = kpiPedidorHoy;
-    st.mtime = Date.now();
+    const kpiPedidorHoy = {}; let kpiHoy = 0;
+    for (const a of st.aprobado) if (isTodayTS(a.ts)) { kpiHoy++; const key=(a.pedidor||"SIN PEDIDOR").toUpperCase(); kpiPedidorHoy[key]=(kpiPedidorHoy[key]||0)+1; }
+    st.kpiHoy = kpiHoy; st.kpiPedidorHoy = kpiPedidorHoy; st.mtime = Date.now();
     await saveState(st);
 
     return res.redirect("/?ok=Listado+procesado");
@@ -729,49 +569,28 @@ app.post("/upload-xml", upload.single("xml"), async (req, res) => {
   }
 });
 
-// ---------- Otras vistas resumidas (cargados/provisión/control-expo vista/descargas) ----------
-// (Por brevedad, mantenemos las ya presentes en tu proyecto original; siguen funcionando
-//  con mergedRowsSync + cache/state persistidos en Blob)
-
-// ---------- Reporte Excel ----------
+// ================== Reporte Excel ==================
 app.get("/despachos/reporte/xlsx", async (req, res) => {
-  const st = await loadState();
-  const cache = await loadCache();
-  const rows = mergedRowsSync(st, cache);
-  const wb = xlsx.utils.book_new();
-  const ws = xlsx.utils.json_to_sheet(rows);
-  xlsx.utils.book_append_sheet(wb, ws, "Despachos");
-
+  const st = await loadState(); const cache = await loadCache(); const rows = mergedRowsSync(st, cache);
+  const wb = xlsx.utils.book_new(); const ws = xlsx.utils.json_to_sheet(rows); xlsx.utils.book_append_sheet(wb, ws, "Despachos");
   if (IS_VERCEL) {
     const buf = xlsx.write(wb, { type: "buffer", bookType: "xlsx" });
     res.setHeader("Content-Disposition", 'attachment; filename="despachos.xlsx"');
     res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
     return res.send(buf);
   } else {
-    const out = path.join(DATA_DIR, "despachos.xlsx");
-    xlsx.writeFile(wb, out);
-    return res.download(out, "despachos.xlsx");
-  }
-});
-app.get("/_debug/blob-cache", async (req, res) => {
-  try {
-    const key = "data/cache.json";
-    const file = await get(key);
-    const ok = !!file?.url;
-    res.json({ ok, key, url: file?.url || null });
-  } catch (e) {
-    res.json({ ok: false, err: e.message });
+    const out = path.join(DATA_DIR, "despachos.xlsx"); xlsx.writeFile(wb, out); return res.download(out, "despachos.xlsx");
   }
 });
 
-// ---------- Error handler ----------
+// ================== Error handler ==================
 app.use((err, req, res, next) => {
   console.error("❌ Unhandled:", err);
   if (res.headersSent) return;
   res.status(500).send("Error en servidor: " + (err?.message || "desconocido"));
 });
 
-// ---------- Start / Export ----------
+// ================== Start / Export ==================
 function listenWithRetry(startPort = parseInt(process.env.PORT || "3000", 10), maxAttempts = 10) {
   let port = startPort;
   (async () => {
@@ -798,7 +617,3 @@ if (IS_VERCEL) {
 } else {
   listenWithRetry();
 }
-
-
-
-
