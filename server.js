@@ -1,31 +1,35 @@
-// server.js — Express + Vercel Blob (PUBLIC) con Listado/EXPO + vistas y alias CSS
+// server.js — Express + Vercel Blob como BD JSON (db/records/) + XML/PDF uploads
 
 const express = require("express");
 const path = require("path");
 const fs = require("fs");
 const compression = require("compression");
-const { parseStringPromise } = require("xml2js");
-const xlsx = require("xlsx");
 const multer = require("multer");
-const { PDFDocument } = require("pdf-lib");
-const http = require("http");
+const { parseStringPromise } = require("xml2js");
 const { DateTime } = require("luxon");
-const { put, list } = require("@vercel/blob");
+const { PDFDocument } = require("pdf-lib");
+const xlsx = require("xlsx");
+const http = require("http");
+const crypto = require("crypto");
+const { put, list, del } = require("@vercel/blob");
 
 const IS_VERCEL = !!process.env.VERCEL;
 const TZ = "America/Santiago";
+const BLOB_ACCESS = process.env.BLOB_ACCESS || "public";
 
+// =============== App base ===============
 const app = express();
 app.set("view engine", "ejs");
 app.set("views", path.join(__dirname, "views"));
 app.locals.basedir = app.get("views");
+
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 app.use(compression());
 app.use("/static", express.static(path.join(__dirname, "public")));
 app.use((req, res, next) => { res.locals.path = req.path || "/"; next(); });
 
-// ===== Alias para CSS (evita 404 de /static/css/styles.css) =====
+// Alias CSS (evita 404 si cambió la ruta)
 app.get("/static/css/styles.css", (req, res) => {
   const p1 = path.join(__dirname, "public", "css", "styles.css");
   const p2 = path.join(__dirname, "public", "styles.css");
@@ -34,6 +38,7 @@ app.get("/static/css/styles.css", (req, res) => {
   return res.status(404).send("styles.css no encontrado");
 });
 
+// Carpetas locales (para servir /uploads en dev)
 const DATA_DIR = IS_VERCEL ? "/tmp/data"    : path.join(__dirname, "data");
 const UP_DIR   = IS_VERCEL ? "/tmp/uploads" : path.join(__dirname, "uploads");
 if (!IS_VERCEL) {
@@ -42,7 +47,7 @@ if (!IS_VERCEL) {
   app.use("/uploads", express.static(UP_DIR));
 }
 
-// ---------------- Logger ----------------
+// =============== Logger breve ===============
 app.use((req, res, next) => {
   const t0 = Date.now();
   console.log(`[REQ] ${req.method} ${req.originalUrl}`);
@@ -50,89 +55,152 @@ app.use((req, res, next) => {
   next();
 });
 
-// ---------------- Utils ----------------
+// =============== Utils comunes ===============
 const wantsJSON = (req) => (req.get("accept")||"").toLowerCase().includes("json") || req.xhr;
-const readJSON  = (p, fb) => { try { return JSON.parse(fs.readFileSync(p, "utf8")); } catch { return fb; } };
-const writeJSON = (p, obj) => { try { fs.writeFileSync(p, JSON.stringify(obj, null, 2), "utf8"); } catch {} };
-const unique = (values) => Array.from(new Set(values.filter(Boolean))).sort((a, b) => String(a).localeCompare(String(b), "es"));
+const unique = (arr) => Array.from(new Set((arr||[]).filter(Boolean))).sort((a,b)=>String(a).localeCompare(String(b),"es"));
 function parseCLDate(str) {
-  if (!str) return null;
-  if (str instanceof Date) return Number.isNaN(str.getTime()) ? null : str;
+  if (!str) return null; if (str instanceof Date) return Number.isNaN(str.getTime()) ? null : str;
   const s = String(str).trim(); const d0 = new Date(s); if (!Number.isNaN(d0.getTime())) return d0;
   let m = s.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})(?:\s+(\d{1,2}):(\d{2}))?$/);
-  if (m) { const dd=+m[1], mm=+m[2]-1, yyyy=+m[3], HH=m[4]?+m[4]:0, MM=m[5]?+m[5]:0; const d = new Date(yyyy, mm, dd, HH, MM, 0, 0); return Number.isNaN(d.getTime()) ? null : d; }
+  if (m){const dd=+m[1],mm=+m[2]-1,yyyy=+m[3],HH=m[4]?+m[4]:0,MM=m[5]?+m[5]:0;const d=new Date(yyyy,mm,dd,HH,MM,0,0);return Number.isNaN(d.getTime())?null:d;}
   m = s.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{2})$/);
-  if (m) { const dd=+m[1], mm=+m[2]-1, yy=+m[3], yyyy = yy + (yy >= 70 ? 1900 : 2000); const d = new Date(yyyy, mm, dd); return Number.isNaN(d.getTime()) ? null : d; }
+  if (m){const dd=+m[1],mm=+m[2]-1,yy=+m[3],yyyy=yy+(yy>=70?1900:2000);const d=new Date(yyyy,mm,dd);return Number.isNaN(d.getTime())?null:d;}
   return null;
 }
-function fmtDMY(dLike) { const d = (dLike instanceof Date) ? dLike : parseCLDate(dLike); if (!d) return ""; return `${String(d.getDate()).padStart(2,"0")}-${String(d.getMonth()+1).padStart(2,"0")}-${d.getFullYear()}`; }
-function isTodayTS(ts) { if (!ts && ts !== 0) return false; const d = DateTime.fromMillis(Number(ts), { zone: TZ }); const now = DateTime.now().setZone(TZ); return d.isValid && d.hasSame(now, "day") && d.hasSame(now, "month") && d.hasSame(now, "year"); }
-function toISOFromFechaHora(fechaYMD, horaHMS) { const f=(fechaYMD||"").trim(); const h=(horaHMS||"").trim() || "00:00:00"; if(!f) return ""; const dt = DateTime.fromFormat(`${f} ${h}`, "yyyy-LL-dd HH:mm:ss", { zone: TZ }); return dt.isValid ? dt.toISO() : ""; }
+function fmtDMY(dLike){const d=(dLike instanceof Date)?dLike:parseCLDate(dLike);if(!d)return"";return `${String(d.getDate()).padStart(2,"0")}-${String(d.getMonth()+1).padStart(2,"0")}-${d.getFullYear()}`;}
+function toISOFromFechaHora(fechaYMD, horaHMS) { const f=(fechaYMD||"").trim(); const h=(horaHMS||"").trim()||"00:00:00"; if(!f) return ""; const dt=DateTime.fromFormat(`${f} ${h}`,"yyyy-LL-dd HH:mm:ss",{zone:TZ}); return dt.isValid?dt.toISO():""; }
+function isTodayTS(ts){ if(!ts&&ts!==0) return false; const d=DateTime.fromMillis(Number(ts),{zone:TZ}); const now=DateTime.now().setZone(TZ); return d.isValid&&d.hasSame(now,"day")&&d.hasSame(now,"month")&&d.hasSame(now,"year"); }
+const normSafe = (s)=>String(s||"").replace(/[^a-zA-Z0-9._-]/g,"_");
+const newId = ()=>crypto.randomUUID();
 
-// ---------------- Blob helpers ----------------
-async function blobPublicUrl(key) {
-  const out = await list({ prefix: key });
-  const exact = out?.blobs?.find(b => b.pathname === key);
-  return (exact || out?.blobs?.[0])?.url || null;
+// =============== Blob helpers ===============
+async function listBlobs(prefix, opts={}) {
+  return await list({ prefix, ...opts });
 }
-async function saveBlobFile(relPath, data, contentType = "application/octet-stream", access = (process.env.BLOB_ACCESS || "public")) {
-  const { url } = await put(relPath, data, { access, contentType });
+async function blobUrlFor(pathname) {
+  const out = await list({ prefix: pathname });
+  const exact = out?.blobs?.find(b => b.pathname === pathname);
+  return exact?.url || null;
+}
+async function saveBlobFile(pathname, data, contentType="application/octet-stream") {
+  const { url } = await put(pathname, data, { access: BLOB_ACCESS, contentType });
   return url;
 }
-async function loadBlobJSON(relPath, fallback) {
+async function saveJSON(pathname, obj) {
+  const body = JSON.stringify(obj, null, 2);
+  return await saveBlobFile(pathname, body, "application/json");
+}
+async function readJSON(pathname, fallback=null) {
   try {
-    const url = await blobPublicUrl(relPath);
+    const url = await blobUrlFor(pathname);
     if (!url) return fallback;
-    const res = await fetch(url);
-    if (!res.ok) return fallback;
-    return await res.json();
+    const r = await fetch(url);
+    if (!r.ok) return fallback;
+    return await r.json();
   } catch { return fallback; }
 }
-async function saveBlobJSON(relPath, obj, access = (process.env.BLOB_ACCESS || "public")) {
-  const body = JSON.stringify(obj, null, 2);
-  return await saveBlobFile(relPath, body, "application/json", access);
-}
 
-// ---------------- Persistentes ----------------
-const STATE_FILE = path.join(DATA_DIR, "state.json");
-const CONTROL_EXPO_FILE = path.join(DATA_DIR, "control_expo.json");
-const CACHE_FILE = path.join(DATA_DIR, "cache.json");
-const STATE_BLOB_KEY = "data/state.json";
-const CONTROL_EXPO_BLOB_KEY = "data/control_expo.json";
-const CACHE_BLOB_KEY = "data/cache.json";
+// =============== “BD” Blob: colección =================
+const DB_PREFIX = "db/records/"; // cada registro = JSON público bajo esta carpeta
 
-async function defaultState() {
-  return {
-    extra: {}, pdfs: {}, pdfsMeta: {}, respaldos: {}, retiros: {}, assigned: {},
-    revision: [], revisado: [], esperando: [], cargado: [], aprobado: [], presentado: [],
-    autoAssignedLog: [], kpiHoy: 0, kpiPedidorHoy: {}, mtime: null
-  };
-}
-async function loadState() { if (IS_VERCEL) return (await loadBlobJSON(STATE_BLOB_KEY, null)) || await defaultState(); return readJSON(STATE_FILE, await defaultState()); }
-async function saveState(st) { st.mtime = Date.now(); if (IS_VERCEL) return await saveBlobJSON(STATE_BLOB_KEY, st); return writeJSON(STATE_FILE, st); }
-async function loadControlExpoFast() { if (IS_VERCEL) return await loadBlobJSON(CONTROL_EXPO_BLOB_KEY, []); return readJSON(CONTROL_EXPO_FILE, []); }
-async function saveControlExpo(rows) { if (IS_VERCEL) return await saveBlobJSON(CONTROL_EXPO_BLOB_KEY, rows || []); return writeJSON(CONTROL_EXPO_FILE, rows || []); }
-async function loadCache() { if (IS_VERCEL) return (await loadBlobJSON(CACHE_BLOB_KEY, null)) || { rows: [], mtime: null }; return readJSON(CACHE_FILE, { rows: [], mtime: null }); }
-async function saveCache(cacheObj) { const out = cacheObj || { rows: [], mtime: Date.now() }; out.mtime = Date.now(); if (IS_VERCEL) return await saveBlobJSON(CACHE_BLOB_KEY, out); return writeJSON(CACHE_FILE, out); }
+// ===== CRUD REST =====
 
-// ---------------- Multer (any) ----------------
-let upload;
-if (IS_VERCEL) {
-  upload = multer({ storage: multer.memoryStorage() });
-} else {
-  upload = multer({
-    storage: multer.diskStorage({
-      destination: (_, __, cb) => cb(null, UP_DIR),
-      filename:   (_, file, cb) => cb(null, `${Date.now()}-${(file.originalname||"archivo").replace(/[^a-zA-Z0-9._-]/g,"_")}`)
-    })
-  });
-}
-const uploadAny = IS_VERCEL
-  ? multer({ storage: multer.memoryStorage() }).any()
-  : multer({ storage: multer.diskStorage({
-      destination: (_, __, cb) => cb(null, UP_DIR),
-      filename:   (_, file, cb) => cb(null, `${Date.now()}-${(file.originalname||"archivo").replace(/[^a-zA-Z0-9._-]/g,"_")}`)
-    })}).any();
+// CREATE
+app.post("/api/records", async (req, res) => {
+  try {
+    const p = req.body || {};
+    const id = p.id || p.DESPACHO || newId();
+    const now = Date.now();
+    const record = {
+      id, createdAt: now, updatedAt: now,
+      DESPACHO: p.DESPACHO || "",
+      CLIENTE_NOMBRE: p.CLIENTE_NOMBRE || "",
+      ADUANA_NOMBRE: p.ADUANA_NOMBRE || "",
+      OPERACION_NOMBRE: p.OPERACION_NOMBRE || "",
+      EJECUTIVO_NOMBRE: p.EJECUTIVO_NOMBRE || "",
+      PEDIDOR_NOMBRE: p.PEDIDOR_NOMBRE || "",
+      FECHA_INGRESO: p.FECHA_INGRESO || "",
+      FECHA_ETA: p.FECHA_ETA || "",
+      data: p.data || {}
+    };
+    const key = `${DB_PREFIX}${id}.json`;
+    await saveJSON(key, record);
+    res.status(201).json({ ok:true, id, record });
+  } catch (e) {
+    console.error("CREATE error:", e);
+    res.status(500).json({ ok:false, error:e.message });
+  }
+});
+
+// LIST (limit/cursor)
+app.get("/api/records", async (req, res) => {
+  try {
+    const limit = Math.max(1, Math.min(1000, parseInt(req.query.limit || "200", 10)));
+    const cursor = req.query.cursor || undefined;
+    const out = await listBlobs(DB_PREFIX, { limit, cursor });
+    const items = await Promise.all((out.blobs||[]).map(async b => {
+      try { const r = await fetch(b.url); return await r.json(); } catch { return null; }
+    }));
+    res.json({ ok:true, count: items.filter(Boolean).length, items: items.filter(Boolean), cursor: out.cursor || null, hasMore: !!out.cursor });
+  } catch (e) {
+    console.error("LIST error:", e);
+    res.status(500).json({ ok:false, error:e.message });
+  }
+});
+
+// READ
+app.get("/api/records/:id", async (req, res) => {
+  try {
+    const id = String(req.params.id);
+    const key = `${DB_PREFIX}${id}.json`;
+    const rec = await readJSON(key, null);
+    if (!rec) return res.status(404).json({ ok:false, error:"Not found" });
+    res.json({ ok:true, record: rec });
+  } catch (e) {
+    console.error("READ error:", e);
+    res.status(500).json({ ok:false, error:e.message });
+  }
+});
+
+// UPDATE (upsert)
+app.put("/api/records/:id", async (req, res) => {
+  try {
+    const id = String(req.params.id);
+    const key = `${DB_PREFIX}${id}.json`;
+    const prev = await readJSON(key, null);
+    const now = Date.now();
+    const merged = { ...(prev || { id, createdAt: now }), ...req.body, id, updatedAt: now };
+    await saveJSON(key, merged);
+    res.json({ ok:true, id, record: merged });
+  } catch (e) {
+    console.error("UPDATE error:", e);
+    res.status(500).json({ ok:false, error:e.message });
+  }
+});
+
+// DELETE
+app.delete("/api/records/:id", async (req, res) => {
+  try {
+    const id = String(req.params.id);
+    const key = `${DB_PREFIX}${id}.json`;
+    await del(key);
+    res.json({ ok:true });
+  } catch (e) {
+    console.error("DELETE error:", e);
+    res.status(500).json({ ok:false, error:e.message });
+  }
+});
+
+// =============== Subidas (XML/PDF) ===============
+const uploadMem = multer({ storage: multer.memoryStorage() });
+const uploadDisk = multer({
+  storage: multer.diskStorage({
+    destination: (_, __, cb) => cb(null, UP_DIR),
+    filename: (_, file, cb) => cb(null, `${Date.now()}-${normSafe(file.originalname || "archivo")}`)
+  })
+});
+const uploadAny = IS_VERCEL ? uploadMem.any() : uploadDisk.any();
+const uploadPDF = IS_VERCEL ? uploadMem.single("pdf") : uploadDisk.single("pdf");
 
 function pickUploadedFile(req) {
   if (req.file) return req.file;
@@ -140,322 +208,41 @@ function pickUploadedFile(req) {
   return null;
 }
 
-// ---------------- Arancel (opcional) ----------------
-const ARANCEL_FILE       = path.join(DATA_DIR, "arancel.json");
-const ALT_ARANCEL_FILE_1 = path.join(DATA_DIR, "arancel_aduanero_2022_version_publicada_sitio_web.json");
-if (!IS_VERCEL) {
-  if (!fs.existsSync(ARANCEL_FILE)) {
-    if (fs.existsSync(ALT_ARANCEL_FILE_1)) {
-      try { fs.writeFileSync(ARANCEL_FILE, fs.readFileSync(ALT_ARANCEL_FILE_1, "utf8"), "utf8"); }
-      catch { writeJSON(ARANCEL_FILE, { headers: [], rows: [] }); }
-    } else writeJSON(ARANCEL_FILE, { headers: [], rows: [] });
-  }
-}
-function loadArancel() {
-  try {
-    const raw = JSON.parse(fs.readFileSync(ARANCEL_FILE, "utf8"));
-    if (raw && Array.isArray(raw.headers) && Array.isArray(raw.rows)) return raw;
-    if (Array.isArray(raw)) return { headers: [], rows: raw };
-    if (raw && Array.isArray(raw.data)) return { headers: raw.headers || [], rows: raw.data };
-    return { headers: [], rows: [] };
-  } catch { return { headers: [], rows: [] }; }
-}
-
-// ---------------- Merge cache + state ----------------
-function getStatusFor(despacho, st) {
-  const d = String(despacho);
-  const has = (arr) => Array.isArray(arr) && arr.some(x => String(x.despacho) === d);
-  if (has(st.revision))   return { key: "revision",   label: "En revisión",  cls: "secondary" };
-  if (has(st.revisado))   return { key: "revisado",   label: "Revisado",     cls: "info" };
-  if (has(st.esperando))  return { key: "esperando",  label: "Esperando ok", cls: "warning" };
-  if (has(st.cargado))    return { key: "cargado",    label: "Cargado",      cls: "primary" };
-  if (has(st.aprobado))   return { key: "aprobado",   label: "Aprobado",     cls: "success" };
-  if (has(st.presentado)) return { key: "presentado", label: "Presentado",   cls: "dark" };
-  return { key: "", label: "—", cls: "light" };
-}
-function mergedRowsSync(st, cache) {
-  const aprobadoMap = new Map((st.aprobado || []).map(x => [String(x.despacho), x]));
-  const raw = Array.isArray(cache.rows) ? cache.rows : [];
-  const rows = raw.filter(r => r && typeof r === "object").map(r => {
-    const despacho = String(r.DESPACHO ?? r.despacho ?? r.Despacho ?? r.Id ?? r.id ?? "").trim();
-    if (!despacho) return null;
-    const k = despacho;
-    const extra = (st.extra || {})[k] || {};
-    const srcIngreso = r.FECHA_INGRESO ?? r.fecha_ingreso ?? r.FECHA ?? r.fecha ?? "";
-    const srcEta     = r.FECHA_ETA     ?? r.fecha_eta     ?? r.ETA   ?? r.eta   ?? "";
-    const dIngreso = parseCLDate(srcIngreso);
-    const dEta = parseCLDate(srcEta);
-    const s = getStatusFor(k, st);
-    const ap = aprobadoMap.get(k);
-    return {
-      ...r,
-      DESPACHO: k,
-      FECHA_INGRESO: srcIngreso, FECHA_ETA: srcEta,
-      FECHA_INGRESO_DATE: dIngreso, FECHA_INGRESO_FMT: fmtDMY(dIngreso),
-      FECHA_ETA_DATE: dEta, FECHA_ETA_FMT: fmtDMY(dEta),
-      pedidor_final: (extra.pedidor || r.PEDIDOR_NOMBRE || "").trim(),
-      estadoKey: s.key, estadoLbl: s.label, estadoCls: s.cls,
-      aprobado: !!ap,
-      pdfPath: (st.pdfs || {})[k] || null,
-      CLIENTE_NOMBRE: r.CLIENTE_NOMBRE || "",
-      ADUANA_NOMBRE: r.ADUANA_NOMBRE || "",
-      OPERACION_NOMBRE: r.OPERACION_NOMBRE || "",
-      EJECUTIVO_NOMBRE: r.EJECUTIVO_NOMBRE || ""
-    };
-  }).filter(Boolean);
-  rows.sort((a,b)=>(b.FECHA_INGRESO_DATE?.getTime()||0)-(a.FECHA_INGRESO_DATE?.getTime()||0));
-  return rows;
-}
-
-// ---------------- Debug ----------------
-app.get("/_debug/env", (req, res) => res.json({ hasToken: !!process.env.BLOB_READ_WRITE_TOKEN, access: process.env.BLOB_ACCESS || "public", vercel: IS_VERCEL }));
-app.get("/_debug/cache", async (req, res) => { const c = await loadCache(); res.json({ ok: true, count: (c.rows||[]).length, sample: (c.rows||[])[0] || null, mtime: c.mtime || null }); });
-app.get("/_debug/blob-cache", async (req, res) => {
-  try {
-    const out = await list({ prefix: "data/cache.json" });
-    res.json({ ok: (out?.blobs?.length || 0) > 0, count: out?.blobs?.length || 0, items: (out?.blobs || []).map(b => ({ pathname: b.pathname, size: b.size, uploadedAt: b.uploadedAt, url: b.url })) });
-  } catch (e) { res.json({ ok: false, err: e.message }); }
-});
-app.get("/_debug/blob-cache-raw", async (req, res) => {
-  try {
-    const url = await blobPublicUrl("data/cache.json"); if (!url) return res.status(404).json({ ok:false, err:"not found" });
-    const r = await fetch(url); const text = await r.text();
-    res.setHeader("Content-Type", "application/json; charset=utf-8"); res.send(text);
-  } catch (e) { res.status(500).json({ ok:false, err:e.message }); }
-});
-app.get("/_debug/merged", async (req, res) => { const st = await loadState(); const cache = await loadCache(); const rows = mergedRowsSync(st, cache); res.json({ ok:true, total: rows.length, sample: rows[0] || null }); });
-app.get("/_debug/uploads", async (req, res) => {
-  try { const out = await list({ prefix: "uploads/xml/" }); res.json({ ok: true, count: out?.blobs?.length || 0, items: (out?.blobs || []).map(b => ({ pathname: b.pathname, size: b.size, uploadedAt: b.uploadedAt, url: b.url })) }); }
-  catch (e) { res.json({ ok:false, err:e.message }); }
-});
-app.get("/_debug/ping", (req, res) => res.json({ ok:true, ts: Date.now() }));
-app.get("/favicon.ico", (req, res) => res.status(404).end());
-
-// ---------------- Vistas ----------------
-app.get("/arancel", (req, res) => {
-  const data = loadArancel();
-  const hasData = (data.headers || []).length && (data.rows || []).length;
-  res.render("arancel", { hasData, headers: data.headers, count: (data.rows || []).length, ok: req.query.ok || "", err: req.query.err || "" });
-});
-
-// Home (Listado)
-app.get("/", async (req, res) => {
-  const st = await loadState();
-  const cache = await loadCache();
-  let rowsAll = mergedRowsSync(st, cache);
-
-  const q = (req.query.q || "").toLowerCase();
-  const fCliente = req.query.cliente || "";
-  const fAduana = req.query.aduana || "";
-  const fPedidor = req.query.pedidor || "";
-  const fEjecutivo = req.query.ejecutivo || "";
-  const fFrom = req.query.from || "";
-  const fTo = req.query.to || "";
-
-  let rows = rowsAll.filter(r => {
-    const hay = `${r.DESPACHO} ${r.CLIENTE_NOMBRE||""} ${r.ADUANA_NOMBRE||""} ${r.OPERACION_NOMBRE||""} ${r.pedidor_final||""}`.toLowerCase();
-    if (q && !hay.includes(q)) return false;
-    if (fCliente && r.CLIENTE_NOMBRE !== fCliente) return false;
-    if (fAduana && r.ADUANA_NOMBRE !== fAduana) return false;
-    if (fPedidor && (r.pedidor_final || "") !== fPedidor) return false;
-    if (fEjecutivo && (r.EJECUTIVO_NOMBRE || "") !== fEjecutivo) return false;
-    const d = r.FECHA_INGRESO_DATE;
-    if (fFrom) { const from = parseCLDate(fFrom); if (d && from && d < from) return false; }
-    if (fTo)   { const to   = parseCLDate(fTo);   if (d && to   && d > to)   return false; }
-    return true;
-  });
-
-  rows.sort((a,b)=>(b.FECHA_INGRESO_DATE?.getTime()||0)-(a.FECHA_INGRESO_DATE?.getTime()||0));
-  const total = rows.length;
-  const page = Math.max(1, parseInt(req.query.page || "1", 10));
-  const perPage = Math.max(1, parseInt(req.query.per || "25", 10));
-  const totalPages = Math.max(1, Math.ceil(total / perPage));
-  rows = rows.slice((page - 1) * perPage, (page - 1) * perPage + perPage);
-
-  const clientes   = unique(rowsAll.map(r => r.CLIENTE_NOMBRE));
-  const aduanas    = unique(rowsAll.map(r => r.ADUANA_NOMBRE));
-  const pedidores  = unique(rowsAll.map(r => r.pedidor_final));
-  const ejecutivos = unique(rowsAll.map(r => r.EJECUTIVO_NOMBRE));
-
-  res.render("index", { rows, total, page, totalPages, q, clientes, aduanas, pedidores, ejecutivos, fCliente, fAduana, fFrom, fTo, fPedidor, fEjecutivo });
-});
-
-// Inicio (panel simple)
-app.get("/inicio", async (req, res) => {
-  const st = await loadState();
-  const cache = await loadCache();
-  const rowsAll = mergedRowsSync(st, cache);
-  const aprobadosSet = new Set((st.aprobado || []).map(x => String(x.despacho)));
-  const assignedView = {};
-  Object.entries(st.assigned || {}).forEach(([ped, arr]) => {
-    const items = (arr || [])
-      .map(x => (typeof x === "object" ? x : { despacho: x, ts: null }))
-      .filter(x => isTodayTS(x.ts) && !aprobadosSet.has(String(x.despacho)))
-      .map(x => {
-        const cliente = (rowsAll.find(r => String(r.DESPACHO) === String(x.despacho))?.CLIENTE_NOMBRE || "").split(" ").slice(0, 6).join(" ");
-        const stInfo = getStatusFor(x.despacho, st);
-        const hora = x.ts ? new Date(x.ts).toLocaleTimeString("es-CL", { hour: "2-digit", minute: "2-digit" }) : "—";
-        return { despacho: x.despacho, hora, clienteCorto: cliente, estadoLabel: stInfo.label, estadoCls: stInfo.cls };
-      });
-    if (items.length) assignedView[ped] = items;
-  });
-  const aprobadosCount = (st.aprobado || []).length;
-  const aprobadosHoy   = (st.aprobado || []).filter(x => isTodayTS(x.ts)).length;
-  res.render("inicio", {
-    assignedView,
-    revision:   st.revision   || [],
-    revisado:   st.revisado   || [],
-    esperando:  st.esperando  || [],
-    cargado:    st.cargado    || [],
-    aprobado:   [],
-    presentado: st.presentado || [],
-    kpi: st.kpiHoy ?? aprobadosHoy,
-    aprobadosCount,
-    aprobadosHoy
-  });
-});
-
-// Cargados (simple: muestra filas con PDF)
-app.get("/cargados", async (req, res) => {
-  const st = await loadState();
-  const rowsAll = mergedRowsSync(st, await loadCache());
-  const withPdf = rowsAll.filter(r => r.pdfPath);
-  const provision = withPdf.filter(r => !(r.pedidor_final && r.pedidor_final.trim())).map(r => ({
-    id:`prov-${r.DESPACHO}`, despacho:r.DESPACHO, cliente:r.CLIENTE_NOMBRE || "", etaFmt:r.FECHA_ETA_FMT || "", pdf:r.pdfPath || null,
-    statusLabel: getStatusFor(r.DESPACHO, st).label, statusColor: getStatusFor(r.DESPACHO, st).cls, colorCls: "bg-light"
-  }));
-  const completa = withPdf.filter(r => (r.pedidor_final && r.pedidor_final.trim())).map(r => ({
-    id:`comp-${r.DESPACHO}`, despacho:r.DESPACHO, cliente:r.CLIENTE_NOMBRE || "", pedidor:r.pedidor_final || "—", etaFmt:r.FECHA_ETA_FMT || "", pdf:r.pdfPath || null,
-    statusLabel: getStatusFor(r.DESPACHO, st).label, statusColor: getStatusFor(r.DESPACHO, st).cls, colorCls: "bg-light"
-  }));
-  res.render("cargados", { provision, completa, aduanas:[], operaciones:[], ejecutivos:[], q:"", fAduana:"", fOperacion:"", fEjecutivo:"", fEtaFrom:"", fEtaTo:"" });
-});
-
-// Control EXPO (vista simple)
-app.get("/control-expo", async (req, res) => {
-  const rows = await loadControlExpoFast();
-  res.render("control_expo", {
-    rows,
-    qDespacho: req.query.despacho||"",
-    qCliente: req.query.cliente||"",
-    fFrom: req.query.venc_from || "",
-    fTo: req.query.venc_to || "",
-    fUrg: req.query.urgencia || "all",
-    sinLegal: (req.query.sin_legalizacion ?? "1") !== "0"
-  });
-});
-
-// ---------------- PDFs ----------------
-app.post("/upload/:despacho", upload.single("pdf"), async (req, res) => {
-  const { despacho } = req.params;
-  let url;
-  if (IS_VERCEL) {
-    const safe = (req.file.originalname || "archivo.pdf").replace(/[^a-zA-Z0-9._-]/g, "_");
-    url = await saveBlobFile(`uploads/pdfs/${Date.now()}-${safe}`, req.file.buffer, "application/pdf");
-  } else {
-    const dst = path.join(UP_DIR, `${Date.now()}-${(req.file.originalname||"archivo.pdf").replace(/[^a-zA-Z0-9._-]/g,"_")}`);
-    fs.copyFileSync(req.file.path, dst); url = `/uploads/${path.basename(dst)}`;
-  }
-  const st = await loadState(); st.pdfs = st.pdfs || {}; st.pdfs[despacho] = url; st.pdfsMeta = st.pdfsMeta || {}; st.pdfsMeta[despacho] = { ts: Date.now() }; await saveState(st);
-  res.redirect("/?page=1");
-});
-app.get("/pdf/view/:despacho", async (req, res) => {
-  const st = await loadState();
-  const p = (st.pdfs || {})[req.params.despacho];
-  if (!p) return res.status(404).send("PDF no encontrado");
-  return res.redirect(p);
-});
-
-// ---------------- EXPO helpers ----------------
-function toISODateOnly(s) { const d = parseCLDate(s); if (!d) return ""; const y=d.getFullYear(), m=String(d.getMonth()+1).padStart(2,'0'), dd=String(d.getDate()).padStart(2,'0'); return `${y}-${m}-${dd}`; }
-function fmtDMYsafe(s) { const d = parseCLDate(s); return d ? fmtDMY(d) : ""; }
-function hasAnyKeyDeep(obj, keys) { if (!obj || typeof obj !== "object") return false; const stack = [obj]; while (stack.length) { const cur = stack.pop(); for (const [k, v] of Object.entries(cur)) { if (keys.includes(String(k))) return true; if (v && typeof v === "object") stack.push(v); } } return false; }
-function isExpoXML(parsed) { const expoKeys = ["FECHA_ACEPTACION_DUS_1","FECHA_LEGALIZACION","FECHA_VENCIMIENTO_DUS","DUS","DUS_VENCIMIENTO"]; return hasAnyKeyDeep(parsed, expoKeys); }
-
-// ---------------- /control-expo/upload-xml ----------------
-app.post("/control-expo/upload-xml", uploadAny, async (req, res) => {
-  try {
-    const f = pickUploadedFile(req);
-    if (!f) return res.redirect("/control-expo?err=No+se+recibio+XML");
-    if (IS_VERCEL) {
-      const filenameSafe = (f.originalname || "archivo.xml").replace(/[^a-zA-Z0-9._-]/g, "_");
-      await saveBlobFile(`uploads/xml/${Date.now()}-${filenameSafe}`, f.buffer, "application/xml");
-    }
-    const xml = IS_VERCEL ? f.buffer.toString("utf8") : fs.readFileSync(f.path, "utf8");
-    const parsed = await parseStringPromise(xml, { explicitArray:false, mergeAttrs:true, trim:true });
-    if (!isExpoXML(parsed)) return res.redirect("/control-expo?err=Este+XML+no+parece+de+EXPO.+Usa+/upload-xml");
-
-    const list =
-      parsed?.Listado?.Registro ? (Array.isArray(parsed.Listado.Registro) ? parsed.Listado.Registro : [parsed.Listado.Registro]) :
-      parsed?.ROWS?.ROW ? (Array.isArray(parsed.ROWS.ROW) ? parsed.ROWS.ROW : [parsed.ROWS.ROW]) :
-      parsed?.ROW ? (Array.isArray(parsed.ROW) ? parsed.ROW : [parsed.ROW]) :
-      Array.isArray(parsed) ? parsed : [];
-
-    const rows = list.map(x => {
-      const DESPACHO = String(x.DESPACHO || x.N_DOC || x.NRO_DOC || x.ID || x.Id || "").trim();
-      const CLIENTE  = String(x.CLIENTE || x.CLIENTE_NOMBRE || x.RAZON_SOCIAL || x.NOMBRE_CLIENTE || "").trim();
-      const DUS      = String(x.DUS || x.N_DUS || x.NUM_DUS || x.NUMERO_DUS || x.DUS_NUMERO || "").trim();
-      const A1_RAW = x.FECHA_ACEPTACION_DUS_1 || x.FECHA_ACEPTACION || x.FEC_ACEPTA_1 || "";
-      const A2_RAW = x.FECHA_ACEPTACION_DUS_2 || x.FECHA_LEGALIZACION || x.FEC_ACEPTA_2 || "";
-      const VTO_RAW= x.FECHA_VENCIMIENTO_DUS || x.DUS_VENCIMIENTO || x.FECHA_VENCIMIENTO || x.VENCIMIENTO_DUS || x.VTO || "";
-      const A1_ISO = toISODateOnly(A1_RAW);
-      const A2_ISO = toISODateOnly(A2_RAW);
-      const VTO_ISO= toISODateOnly(VTO_RAW);
-      const A1_TIME = parseCLDate(A1_ISO)?.getTime() ?? null;
-      const A2_TIME = parseCLDate(A2_ISO)?.getTime() ?? null;
-      const VTO_TIME= parseCLDate(VTO_ISO)?.getTime() ?? null;
-      return {
-        DESPACHO, CLIENTE, DUS,
-        ACEPTA1_RAW: A1_RAW, ACEPTA1_ISO: A1_ISO, ACEPTA1_FMT: fmtDMYsafe(A1_ISO), ACEPTA1_TIME: A1_TIME,
-        ACEPTA2_RAW: A2_RAW, ACEPTA2_ISO: A2_ISO, ACEPTA2_FMT: fmtDMYsafe(A2_ISO), ACEPTA2_TIME: A2_TIME,
-        DUS_VENCIMIENTO_RAW: VTO_RAW, DUS_VENCIMIENTO_ISO: VTO_ISO, DUS_VENCIMIENTO_FMT: fmtDMYsafe(VTO_ISO), DUS_VENCIMIENTO_TIME: VTO_TIME
-      };
-    }).filter(r => r.DESPACHO);
-
-    await saveControlExpo(rows);
-    return res.redirect("/control-expo?ok=XML+cargado");
-  } catch (err) {
-    console.error("CONTROL EXPO XML error:", err);
-    return res.redirect("/control-expo?err=No+se+pudo+procesar+el+XML");
-  }
-});
-
-// ---------------- /upload-xml (dispatcher LISTADO/EXPO) ----------------
+// Dispatcher: procesa Listado y guarda cada fila como registro en Blob (id = DESPACHO)
 app.post("/upload-xml", uploadAny, async (req, res) => {
   try {
     const f = pickUploadedFile(req);
     if (!f) return res.status(400).send("Debes subir un XML (campo file/xml/archivo)");
-    console.log(`[UPLOAD-XML] recibido: ${f.originalname || "sin-nombre"} size=${f.size || 0}`);
 
+    // Guardar el archivo fuente en Blob (histórico)
     if (IS_VERCEL) {
-      const filenameSafe = (f.originalname || "archivo.xml").replace(/[^a-zA-Z0-9._-]/g, "_");
-      await saveBlobFile(`uploads/xml/${Date.now()}-${filenameSafe}`, f.buffer, "application/xml");
+      await saveBlobFile(`uploads/xml/${Date.now()}-${normSafe(f.originalname||"archivo.xml")}`, f.buffer, "application/xml");
     }
+
     const xmlStr = IS_VERCEL ? f.buffer.toString("utf8") : fs.readFileSync(f.path, "utf8");
-    const parsed0 = await parseStringPromise(xmlStr, { explicitArray:false, trim:true, mergeAttrs:true });
+    const parsed = await parseStringPromise(xmlStr, { explicitArray:false, mergeAttrs:true, trim:true });
 
-    const tipo = String(req.query.tipo || "").toLowerCase();
-    const forceExpo = tipo === "expo";
-    const forceListado = tipo === "listado";
-    if (forceExpo || (!forceListado && isExpoXML(parsed0))) {
-      req.url = "/control-expo/upload-xml";
-      return app._router.handle({ ...req, url: "/control-expo/upload-xml", method: "POST", file: f, files: [f] }, res, ()=>{});
+    // Asumimos estructura <Listado><Registro>
+    const lista = parsed?.Listado?.Registro
+      ? (Array.isArray(parsed.Listado.Registro) ? parsed.Listado.Registro : [parsed.Listado.Registro])
+      : [];
+
+    if (!lista.length) {
+      console.warn("[UPLOAD-XML] Estructura no reconocida o sin registros");
+      return res.redirect("/?error=XML+sin+registros");
     }
 
-    // ---- LISTADO ----
-    const registros = Array.isArray(parsed0?.Listado?.Registro)
-      ? parsed0.Listado.Registro
-      : (parsed0?.Listado?.Registro ? [parsed0.Listado.Registro] : []);
-    if (!registros.length) {
-      console.warn("[UPLOAD-XML] Listado vacío o estructura no reconocida");
-      return res.redirect("/?error=XML+de+Listado+sin+registros");
-    }
-    const val = (o, k, d="") => { const v = o?.[k]; return (v===undefined||v===null) ? d : String(v).trim(); };
-
+    // Persistir cada fila como registro en Blob
     const now = Date.now();
-    const filas = registros.map(r => {
-      const DESPACHO = val(r,"DESPACHO",""); if (!DESPACHO) return null;
-      return {
+    const val = (o,k,d="") => { const v=o?.[k]; return (v===undefined||v===null)?d:String(v).trim(); };
+
+    let created = 0;
+    for (const r of lista) {
+      const DESPACHO = val(r,"DESPACHO","");
+      if (!DESPACHO) continue;
+
+      const record = {
+        id: DESPACHO,
         DESPACHO,
         CLIENTE_NOMBRE:   val(r,"CLIENTE_NOMBRE"),
         ADUANA_NOMBRE:    val(r,"ADUANA_NOMBRE"),
@@ -464,64 +251,137 @@ app.post("/upload-xml", uploadAny, async (req, res) => {
         PEDIDOR_NOMBRE:   val(r,"PEDIDOR_NOMBRE"),
         FECHA_INGRESO:    val(r,"FECHA_INGRESO"),
         FECHA_ETA:        val(r,"FECHA_ETA"),
-        __ts: now
+        createdAt: now, updatedAt: now
       };
-    }).filter(Boolean);
 
-    const cachePrev = await loadCache();
-    const map = new Map((cachePrev.rows || []).map(r => [String(r.DESPACHO), r]));
-    for (const row of filas) map.set(String(row.DESPACHO), { ...(map.get(String(row.DESPACHO)) || {}), ...row });
-    const cacheNext = { rows: Array.from(map.values()), mtime: now };
-    await saveCache(cacheNext);
-    console.log(`[UPLOAD-XML] Listado: ${filas.length} filas nuevas; cache total=${cacheNext.rows.length}`);
-
-    const st = await loadState();
-    st.aprobado = Array.isArray(st.aprobado) ? st.aprobado : [];
-    const byId = new Map(st.aprobado.map(x => [String(x.despacho), x]));
-    for (const r of registros) {
-      const d = val(r,"DESPACHO",""); if (!d) continue;
-      const fecha = val(r,"FECHA_ACEPTACION",""); const hora = val(r,"HORA_ACEPTACION","");
-      if (!fecha && !hora) continue;
-      const iso = toISOFromFechaHora(fecha, hora); if (!iso) continue;
-      const ts = DateTime.fromISO(iso, { zone: TZ }).toMillis();
-      const payload = { despacho: d, cliente: val(r,"CLIENTE_NOMBRE",""), pedidor: val(r,"PEDIDOR_NOMBRE",""), ts, fecha: iso };
-      const prev = byId.get(d); if (!prev || (ts || 0) > (prev.ts || 0)) byId.set(d, payload);
+      const key = `${DB_PREFIX}${DESPACHO}.json`;
+      const prev = await readJSON(key, null);
+      const merged = { ...(prev || { id: DESPACHO, createdAt: now }), ...record, updatedAt: now };
+      await saveJSON(key, merged);
+      created++;
     }
-    st.aprobado = Array.from(byId.values()).sort((a,b)=>(b.ts||0)-(a.ts||0));
-    const kpiPedidorHoy = {}; let kpiHoy = 0;
-    for (const a of st.aprobado) if (isTodayTS(a.ts)) { kpiHoy++; const key=(a.pedidor||"SIN PEDIDOR").toUpperCase(); kpiPedidorHoy[key]=(kpiPedidorHoy[key]||0)+1; }
-    st.kpiHoy = kpiHoy; st.kpiPedidorHoy = kpiPedidorHoy; st.mtime = Date.now();
-    await saveState(st);
+
+    console.log(`[UPLOAD-XML] Registros guardados/actualizados: ${created}`);
+
+    // KPI de aprobados (si vienen FECHA_ACEPTACION/HORA_ACEPTACION)
+    // -> opcional: podrías guardar otra colección db/aprobados/ si lo necesitas
 
     return res.redirect("/?ok=Listado+procesado");
   } catch (err) {
-    console.error("upload-xml dispatcher error:", err);
+    console.error("upload-xml error:", err);
     return res.status(500).send("Error procesando /upload-xml");
   }
 });
 
-// ---------------- Reporte Excel ----------------
+// PDF por despacho -> guarda archivo en Blob y referencia dentro del registro
+app.post("/upload/:despacho", uploadPDF, async (req, res) => {
+  try {
+    const { despacho } = req.params;
+    if (!req.file) return res.status(400).send("Debes subir un PDF (campo pdf)");
+
+    let url;
+    if (IS_VERCEL) {
+      url = await saveBlobFile(`uploads/pdfs/${Date.now()}-${normSafe(req.file.originalname||"archivo.pdf")}`, req.file.buffer, "application/pdf");
+    } else {
+      const dst = path.join(UP_DIR, `${Date.now()}-${normSafe(req.file.originalname||"archivo.pdf")}`);
+      fs.copyFileSync(req.file.path, dst);
+      url = `/uploads/${path.basename(dst)}`;
+    }
+
+    // Actualizar el registro con la url del PDF
+    const key = `${DB_PREFIX}${despacho}.json`;
+    const prev = await readJSON(key, null);
+    const now = Date.now();
+    const merged = { ...(prev || { id: despacho, DESPACHO: despacho, createdAt: now }), pdfPath: url, updatedAt: now };
+    await saveJSON(key, merged);
+
+    return res.redirect("/?page=1");
+  } catch (e) {
+    console.error("upload pdf error:", e);
+    res.status(500).send("Error subiendo PDF");
+  }
+});
+
+// =============== Vistas ===============
+
+// Home: lee registros desde Blob y pinta la tabla
+app.get("/", async (req, res) => {
+  const out = await listBlobs(DB_PREFIX, { limit: 1000 });
+  const records = await Promise.all((out.blobs||[]).map(async b => {
+    try { const r = await fetch(b.url); return await r.json(); } catch { return null; }
+  }));
+  let rowsAll = (records.filter(Boolean) || []);
+  // filtros mínimos (ajusta a tus inputs si lo deseas)
+  const q = (req.query.q || "").toLowerCase();
+  if (q) rowsAll = rowsAll.filter(r => `${r.DESPACHO} ${r.CLIENTE_NOMBRE} ${r.ADUANA_NOMBRE} ${r.OPERACION_NOMBRE} ${r.PEDIDOR_NOMBRE}`.toLowerCase().includes(q));
+  rowsAll.sort((a,b)=> (parseCLDate(b.FECHA_INGRESO)?.getTime()||0) - (parseCLDate(a.FECHA_INGRESO)?.getTime()||0));
+
+  const clientes   = unique(rowsAll.map(r=>r.CLIENTE_NOMBRE));
+  const aduanas    = unique(rowsAll.map(r=>r.ADUANA_NOMBRE));
+  const pedidores  = unique(rowsAll.map(r=>r.PEDIDOR_NOMBRE));
+  const ejecutivos = unique(rowsAll.map(r=>r.EJECUTIVO_NOMBRE));
+
+  // paginación simple
+  const total = rowsAll.length;
+  const page = Math.max(1, parseInt(req.query.page || "1", 10));
+  const perPage = Math.max(1, parseInt(req.query.per || "25", 10));
+  const totalPages = Math.max(1, Math.ceil(total / perPage));
+  const rows = rowsAll.slice((page-1)*perPage, (page-1)*perPage+perPage);
+
+  res.render("index", { rows, total, page, totalPages, q,
+    clientes, aduanas, pedidores, ejecutivos,
+    fCliente:"", fAduana:"", fFrom:"", fTo:"", fPedidor:"", fEjecutivo:""
+  });
+});
+
+// Vistas auxiliares (si tus EJS existen)
+app.get("/inicio", (req, res) => res.render("inicio", { assignedView:{}, revision:[], revisado:[], esperando:[], cargado:[], aprobado:[], presentado:[], kpi:0, aprobadosCount:0, aprobadosHoy:0 }));
+app.get("/cargados", async (req, res) => {
+  const out = await listBlobs(DB_PREFIX, { limit:1000 });
+  const records = await Promise.all((out.blobs||[]).map(async b => { try{ const r=await fetch(b.url); return await r.json(); }catch{return null;} }));
+  const rows = (records.filter(Boolean)||[]);
+  const withPdf = rows.filter(r => r.pdfPath);
+  const provision = withPdf.filter(r => !(r.PEDIDOR_NOMBRE||"").trim()).map(r => ({ id:`prov-${r.DESPACHO}`, despacho:r.DESPACHO, cliente:r.CLIENTE_NOMBRE||"", etaFmt:fmtDMY(r.FECHA_ETA), pdf:r.pdfPath||null, statusLabel:"", statusColor:"", colorCls:"bg-light" }));
+  const completa  = withPdf.filter(r => (r.PEDIDOR_NOMBRE||"").trim()).map(r => ({ id:`comp-${r.DESPACHO}`, despacho:r.DESPACHO, cliente:r.CLIENTE_NOMBRE||"", pedidor:r.PEDIDOR_NOMBRE||"—", etaFmt:fmtDMY(r.FECHA_ETA), pdf:r.pdfPath||null, statusLabel:"", statusColor:"", colorCls:"bg-light" }));
+  res.render("cargados", { provision, completa, aduanas:[], operaciones:[], ejecutivos:[], q:"", fAduana:"", fOperacion:"", fEjecutivo:"", fEtaFrom:"", fEtaTo:"" });
+});
+app.get("/control-expo", async (req, res) => res.render("control_expo", { rows:[], qDespacho:"", qCliente:"", fFrom:"", fTo:"", fUrg:"all", sinLegal:true }));
+
+// Excel (genera desde la “BD” Blob)
 app.get("/despachos/reporte/xlsx", async (req, res) => {
-  const st = await loadState(); const cache = await loadCache(); const rows = mergedRowsSync(st, cache);
-  const wb = xlsx.utils.book_new(); const ws = xlsx.utils.json_to_sheet(rows); xlsx.utils.book_append_sheet(wb, ws, "Despachos");
+  const out = await listBlobs(DB_PREFIX, { limit: 5000 });
+  const records = await Promise.all((out.blobs||[]).map(async b => { try{ const r=await fetch(b.url); return await r.json(); }catch{return null;} }));
+  const rows = (records.filter(Boolean)||[]);
+  const wb = xlsx.utils.book_new(); const ws = xlsx.utils.json_to_sheet(rows);
+  xlsx.utils.book_append_sheet(wb, ws, "Despachos");
   if (IS_VERCEL) {
     const buf = xlsx.write(wb, { type: "buffer", bookType: "xlsx" });
     res.setHeader("Content-Disposition", 'attachment; filename="despachos.xlsx"');
     res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
     return res.send(buf);
   } else {
-    const out = path.join(DATA_DIR, "despachos.xlsx"); xlsx.writeFile(wb, out); return res.download(out, "despachos.xlsx");
+    const outFile = path.join(DATA_DIR, "despachos.xlsx");
+    xlsx.writeFile(wb, outFile);
+    return res.download(outFile, "despachos.xlsx");
   }
 });
 
-// ---------------- Error handler ----------------
+// =============== Debug rápido ===============
+app.get("/_debug/env", (req, res)=>res.json({ vercel:IS_VERCEL, hasToken:!!process.env.BLOB_READ_WRITE_TOKEN, access:BLOB_ACCESS }));
+app.get("/_debug/db", async (req, res) => {
+  const out = await listBlobs(DB_PREFIX, { limit: 100 });
+  res.json({ ok:true, count: out?.blobs?.length || 0, sample: out?.blobs?.[0] || null });
+});
+app.get("/favicon.ico", (req,res)=>res.status(404).end());
+
+// =============== Error handler ===============
 app.use((err, req, res, next) => {
   console.error("❌ Unhandled:", err);
   if (res.headersSent) return;
   res.status(500).send("Error en servidor: " + (err?.message || "desconocido"));
 });
 
-// ---------------- Start / Export ----------------
+// =============== Start / Export ===============
 function listenWithRetry(startPort = parseInt(process.env.PORT || "3000", 10), maxAttempts = 10) {
   let port = startPort;
   (async () => {
@@ -544,7 +404,7 @@ function listenWithRetry(startPort = parseInt(process.env.PORT || "3000", 10), m
 }
 
 if (IS_VERCEL) {
-  module.exports = app; // @vercel/node
+  module.exports = app; // para @vercel/node
 } else {
   listenWithRetry();
 }
