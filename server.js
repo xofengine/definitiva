@@ -739,6 +739,16 @@ app.get("/despachos/reporte/xlsx", async (req, res) => {
     return res.download(out, "despachos.xlsx");
   }
 });
+app.get("/_debug/blob-cache", async (req, res) => {
+  try {
+    const key = "data/cache.json";
+    const file = await get(key);
+    const ok = !!file?.url;
+    res.json({ ok, key, url: file?.url || null });
+  } catch (e) {
+    res.json({ ok: false, err: e.message });
+  }
+});
 
 // ---------- Error handler ----------
 app.use((err, req, res, next) => {
@@ -774,3 +784,4 @@ if (IS_VERCEL) {
 } else {
   listenWithRetry();
 }
+
