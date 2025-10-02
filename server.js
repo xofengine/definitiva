@@ -414,6 +414,20 @@ app.get("/", async (req, res) => {
     fCliente, fAduana, fFrom, fTo, fPedidor, fEjecutivo
   });
 });
+app.get("/_debug/blob-cache", async (req, res) => {
+  try {
+    const key = "data/cache.json";
+    const file = await get(key);
+    res.json({ ok: !!file?.url, key, url: file?.url || null });
+  } catch (e) {
+    res.json({ ok: false, err: e.message });
+  }
+});
+app.get("/_debug/env", (req, res) => {
+  const hasToken = !!process.env.BLOB_READ_WRITE_TOKEN;
+  const access = process.env.BLOB_ACCESS || "public";
+  res.json({ hasToken, access });
+});
 
 // ---------- Flujo ----------
 function pickClienteFromRows(rows, despacho) {
@@ -784,4 +798,5 @@ if (IS_VERCEL) {
 } else {
   listenWithRetry();
 }
+
 
