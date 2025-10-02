@@ -1,6 +1,6 @@
-// server.js — Express listo para Vercel con persistencia en Vercel Blob
-// - Persistencia real: control_expo.json, state.json, uploads (XML/PDF/respaldos)
-// - En Vercel usa memoryStorage + Blob; en local, disco (./data, ./uploads)
+// server.js — Express + Vercel Blob (PUBLIC) para XML/PDF y JSON de estado
+// - En Vercel: usa memoryStorage + Blob (public) y exporta la app.
+// - En local: usa disco ./uploads y ./data para probar cómodo.
 
 const express = require("express");
 const path = require("path");
@@ -12,36 +12,33 @@ const multer = require("multer");
 const { PDFDocument } = require("pdf-lib");
 const http = require("http");
 const { DateTime } = require("luxon");
-const { put, get } = require("@vercel/blob"); // requiere BLOB_READ_WRITE_TOKEN en env
+const { put, get } = require("@vercel/blob");
 
-// ====== Entorno ======
+// ===== Entorno =====
 const IS_VERCEL = !!process.env.VERCEL;
-const IS_PROD = process.env.NODE_ENV === "production" || IS_VERCEL;
 const TZ = "America/Santiago";
 
-// ====== App base ======
+// ===== App =====
 const app = express();
 app.set("view engine", "ejs");
 app.set("views", path.join(__dirname, "views"));
 app.locals.basedir = app.get("views");
-
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 app.use(compression());
-
 app.use("/static", express.static(path.join(__dirname, "public")));
 app.use((req, res, next) => { res.locals.path = req.path || "/"; next(); });
 
-// ====== Paths locales (solo para desarrollo local) ======
+// En local servimos /uploads desde disco. En Vercel todos los ficheros van a Blob.
 const DATA_DIR = IS_VERCEL ? "/tmp/data"    : path.join(__dirname, "data");
 const UP_DIR   = IS_VERCEL ? "/tmp/uploads" : path.join(__dirname, "uploads");
-try { if (!IS_VERCEL) fs.mkdirSync(DATA_DIR, { recursive: true }); } catch {}
-try { if (!IS_VERCEL) fs.mkdirSync(UP_DIR,   { recursive: true }); } catch {}
+if (!IS_VERCEL) {
+  try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch {}
+  try { fs.mkdirSync(UP_DIR,   { recursive: true }); } catch {}
+  app.use("/uploads", express.static(UP_DIR));
+}
 
-// Sirve /uploads (solo útil en local). En Vercel guardamos en Blob y servimos por URL.
-if (!IS_VERCEL) app.use("/uploads", express.static(UP_DIR));
-
-// ====== Logger ======
+// ===== Logger simple =====
 app.use((req, res, next) => {
   const t0 = Date.now();
   console.log(`[REQ] ${req.method} ${req.originalUrl}`);
@@ -49,10 +46,7 @@ app.use((req, res, next) => {
   next();
 });
 
-// ====== Salud ======
-app.get("/_debug/ping", (req, res) => res.json({ ok: true, ts: Date.now(), vercel: IS_VERCEL }));
-
-// ====== Helpers genéricos ======
+// ===== Utilidades comunes =====
 const wantsJSON = (req) => (req.get("accept")||"").toLowerCase().includes("json") || req.xhr;
 const readJSON  = (p, fb) => { try { return JSON.parse(fs.readFileSync(p, "utf8")); } catch { return fb; } };
 const writeJSON = (p, obj) => { try { fs.writeFileSync(p, JSON.stringify(obj, null, 2), "utf8"); } catch (e) { console.warn("writeJSON fail:", e.message); } };
@@ -104,11 +98,11 @@ function toISOFromFechaHora(fechaYMD, horaHMS) {
 }
 const normTxt = s => String(s||"").toUpperCase().replace(/[.,]/g,"").replace(/\s+/g," ").trim();
 
-// ====== Vercel Blob helpers ======
-async function saveBlobFile(relPath, data, contentType = "application/octet-stream", access = "private") {
-  // relPath: p.ej. "uploads/xml/123.xml" o "data/state.json"
+// ===== Vercel Blob helpers (PUBLIC por defecto) =====
+async function saveBlobFile(relPath, data, contentType = "application/octet-stream", access = (process.env.BLOB_ACCESS || "public")) {
+  // access por defecto: "public" para tokens RW configurados como públicos
   const { url } = await put(relPath, data, { access, contentType });
-  return url; // URL firmada del Blob
+  return url; // URL del Blob (pública si access="public")
 }
 async function loadBlobJSON(relPath, fallback) {
   try {
@@ -121,12 +115,12 @@ async function loadBlobJSON(relPath, fallback) {
     return fallback;
   }
 }
-async function saveBlobJSON(relPath, obj, access = "private") {
+async function saveBlobJSON(relPath, obj, access = (process.env.BLOB_ACCESS || "public")) {
   const body = JSON.stringify(obj, null, 2);
   return await saveBlobFile(relPath, body, "application/json", access);
 }
 
-// ====== Archivos base (Arancel en local/ephemeral; state/control_expo en Blob) ======
+// ===== Archivos base (estado en Blob; arancel local/efímero) =====
 const ARANCEL_FILE       = path.join(DATA_DIR, "arancel.json");
 const ALT_ARANCEL_FILE_1 = path.join(DATA_DIR, "arancel_aduanero_2022_version_publicada_sitio_web.json");
 if (!IS_VERCEL) {
@@ -139,11 +133,10 @@ if (!IS_VERCEL) {
     }
   }
 }
-
-const STATE_FILE = path.join(DATA_DIR, "state.json");           // solo en local
-const CONTROL_EXPO_FILE = path.join(DATA_DIR, "control_expo.json"); // solo en local
-const CONTROL_EXPO_BLOB_KEY = "data/control_expo.json";
+const STATE_FILE = path.join(DATA_DIR, "state.json");
+const CONTROL_EXPO_FILE = path.join(DATA_DIR, "control_expo.json");
 const STATE_BLOB_KEY = "data/state.json";
+const CONTROL_EXPO_BLOB_KEY = "data/control_expo.json";
 
 async function defaultState() {
   return {
@@ -173,7 +166,7 @@ async function saveControlExpo(rows) {
   return writeJSON(CONTROL_EXPO_FILE, rows || []);
 }
 
-// ====== Multer ======
+// ===== Multer =====
 let upload;
 if (IS_VERCEL) {
   upload = multer({ storage: multer.memoryStorage() });
@@ -188,10 +181,9 @@ if (IS_VERCEL) {
   upload = multer({ storage });
 }
 
-// ====== Arancel utils ======
+// ===== Arancel helpers =====
 function loadArancel() {
   if (IS_VERCEL) {
-    // En Vercel no persistimos arancel en Blob por simplicidad (puedes moverlo si quieres)
     try { return JSON.parse(fs.readFileSync(ARANCEL_FILE, "utf8")); } catch { return { headers: [], rows: [] }; }
   } else {
     try {
@@ -225,7 +217,7 @@ const pickGlosaInRow = (row, headers)=>{
   return "";
 };
 
-// ====== State merge helpers ======
+// ===== Merge/cache helpers =====
 function getStatusFor(despacho, st) {
   const d = String(despacho);
   const has = (arr) => Array.isArray(arr) && arr.some(x => String(x.despacho) === d);
@@ -237,6 +229,9 @@ function getStatusFor(despacho, st) {
   if (has(st.presentado)) return { key: "presentado", label: "Presentado",   cls: "dark" };
   return { key: "", label: "—", cls: "light" };
 }
+const CACHE_FILE = path.join(DATA_DIR, "cache.json");
+function loadCache() { return readJSON(CACHE_FILE, { rows: [], mtime: null }); }
+
 function mergedRowsSync(st, cache) {
   const aprobadoMap = new Map((st.aprobado || []).map(x => [String(x.despacho), x]));
   const raw = Array.isArray(cache.rows) ? cache.rows : [];
@@ -278,13 +273,13 @@ function mergedRowsSync(st, cache) {
   return rows;
 }
 
-// Cache (en tu código original lo cargas de archivo; mantenemos local/ephemeral)
-const CACHE_FILE = path.join(DATA_DIR, "cache.json");
-function loadCache() { return readJSON(CACHE_FILE, { rows: [], mtime: null }); }
+// ===== Rutas =====
 
-// ====== Rutas ======
+// salud y favicon
+app.get("/_debug/ping", (req, res) => res.json({ ok: true, ts: Date.now(), vercel: IS_VERCEL }));
+app.get("/favicon.ico", (req, res) => res.status(404).end());
 
-// Hoja de estilos fallback
+// estilos fallback
 app.get("/static/css/styles.css", (req, res) => {
   const p1 = path.join(__dirname, "public", "css", "styles.css");
   const p2 = path.join(__dirname, "public", "styles.css");
@@ -293,7 +288,7 @@ app.get("/static/css/styles.css", (req, res) => {
   return res.status(404).send("styles.css no encontrado");
 });
 
-// ---- Arancel
+// ---------- Arancel ----------
 app.get("/arancel", (req, res) => {
   const data = loadArancel();
   const hasData = (data.headers || []).length && (data.rows || []).length;
@@ -349,7 +344,7 @@ app.all("/arancel/data", (req, res) => {
   }
 });
 
-// ---- Home (Listado)
+// ---------- Home (Listado) ----------
 app.get("/", async (req, res) => {
   const st = await loadState();
   const cache = loadCache();
@@ -396,48 +391,11 @@ app.get("/", async (req, res) => {
   });
 });
 
-// ---- Flujo
+// ---------- Flujo ----------
 function pickClienteFromRows(rows, despacho) {
   const it = rows.find(r => String(r.DESPACHO) === String(despacho));
   return it ? (it.CLIENTE_NOMBRE || "") : "";
 }
-app.get("/inicio", async (req, res) => {
-  const st = await loadState();
-  const cache = loadCache();
-  const rowsAll = mergedRowsSync(st, cache);
-
-  const aprobadosSet = new Set((st.aprobado || []).map(x => String(x.despacho)));
-  const assignedView = {};
-  Object.entries(st.assigned || {}).forEach(([ped, arr]) => {
-    const items = (arr || [])
-      .map(x => (typeof x === "object" ? x : { despacho: x, ts: null }))
-      .filter(x => isTodayTS(x.ts) && !aprobadosSet.has(String(x.despacho)))
-      .map(x => {
-        const cliente = (pickClienteFromRows(rowsAll, x.despacho) || "").split(" ").slice(0, 6).join(" ");
-        const stInfo = getStatusFor(x.despacho, st);
-        const hora = x.ts ? new Date(x.ts).toLocaleTimeString("es-CL", { hour: "2-digit", minute: "2-digit" }) : "—";
-        return { despacho: x.despacho, hora, clienteCorto: cliente, estadoLabel: stInfo.label, estadoCls: stInfo.cls };
-      });
-    if (items.length) assignedView[ped] = items;
-  });
-
-  const aprobadosCount = (st.aprobado || []).length;
-  const aprobadosHoy   = (st.aprobado || []).filter(x => isTodayTS(x.ts)).length;
-
-  res.render("inicio", {
-    assignedView,
-    revision:   st.revision   || [],
-    revisado:   st.revisado   || [],
-    esperando:  st.esperando  || [],
-    cargado:    st.cargado    || [],
-    aprobado:   [], // no listar
-    presentado: st.presentado || [],
-    kpi: st.kpiHoy ?? aprobadosHoy,
-    aprobadosCount,
-    aprobadosHoy
-  });
-});
-
 function doAdvance(st, section, despacho, cliente) {
   const advance = (fromArrName, toArrName) => {
     const fromArr = st[fromArrName] || [];
@@ -457,6 +415,39 @@ function doAdvance(st, section, despacho, cliente) {
   else return false;
   st.mtime = Date.now(); return true;
 }
+app.get("/inicio", async (req, res) => {
+  const st = await loadState();
+  const cache = loadCache();
+  const rowsAll = mergedRowsSync(st, cache);
+  const aprobadosSet = new Set((st.aprobado || []).map(x => String(x.despacho)));
+  const assignedView = {};
+  Object.entries(st.assigned || {}).forEach(([ped, arr]) => {
+    const items = (arr || [])
+      .map(x => (typeof x === "object" ? x : { despacho: x, ts: null }))
+      .filter(x => isTodayTS(x.ts) && !aprobadosSet.has(String(x.despacho)))
+      .map(x => {
+        const cliente = (pickClienteFromRows(rowsAll, x.despacho) || "").split(" ").slice(0, 6).join(" ");
+        const stInfo = getStatusFor(x.despacho, st);
+        const hora = x.ts ? new Date(x.ts).toLocaleTimeString("es-CL", { hour: "2-digit", minute: "2-digit" }) : "—";
+        return { despacho: x.despacho, hora, clienteCorto: cliente, estadoLabel: stInfo.label, estadoCls: stInfo.cls };
+      });
+    if (items.length) assignedView[ped] = items;
+  });
+  const aprobadosCount = (st.aprobado || []).length;
+  const aprobadosHoy   = (st.aprobado || []).filter(x => isTodayTS(x.ts)).length;
+  res.render("inicio", {
+    assignedView,
+    revision:   st.revision   || [],
+    revisado:   st.revisado   || [],
+    esperando:  st.esperando  || [],
+    cargado:    st.cargado    || [],
+    aprobado:   [],
+    presentado: st.presentado || [],
+    kpi: st.kpiHoy ?? aprobadosHoy,
+    aprobadosCount,
+    aprobadosHoy
+  });
+});
 app.all("/flujo/advance/:section/:despacho", async (req, res) => {
   const section  = String(req.params.section || "").toLowerCase();
   const despacho = String(req.params.despacho || "");
@@ -529,7 +520,7 @@ app.get("/modal-data/:despacho", async (req, res) => {
   res.json({ ok: true, data: payload });
 });
 
-// ---- Aplicación: merge PDFs (guarda merged en Blob en Vercel; en local a disco)
+// ---------- Aplicación: merge PDFs ----------
 app.get("/aplicacion", (req, res) => {
   res.render("aplicacion", { merged: (req.query.merged || "").trim(), error: (req.query.error || "").trim() });
 });
@@ -545,13 +536,12 @@ app.post("/aplicacion/merge", upload.array("pdfs", 30), async (req, res) => {
       srcPages.forEach(p => outDoc.addPage(p));
     }
     const mergedName = `merged-${Date.now()}.pdf`;
+    const pdfBytes = await outDoc.save();
     if (IS_VERCEL) {
-      const pdfBytes = await outDoc.save();
-      const url = await saveBlobFile(`uploads/pdfs/${mergedName}`, pdfBytes, "application/pdf", "private");
+      const url = await saveBlobFile(`uploads/pdfs/${mergedName}`, pdfBytes, "application/pdf");
       return res.redirect(`/aplicacion?merged=${encodeURIComponent(url)}`);
     } else {
       const mergedPath = path.join(UP_DIR, mergedName);
-      const pdfBytes = await outDoc.save();
       fs.writeFileSync(mergedPath, pdfBytes);
       return res.redirect(`/aplicacion?merged=/uploads/${mergedName}`);
     }
@@ -561,7 +551,7 @@ app.post("/aplicacion/merge", upload.array("pdfs", 30), async (req, res) => {
   }
 });
 
-// ---- Update extras
+// ---------- Extras (docs/carga/gastos/resumen) ----------
 app.post("/update/:despacho", async (req, res) => {
   const D = String(req.params.despacho);
   const st = await loadState();
@@ -570,15 +560,13 @@ app.post("/update/:despacho", async (req, res) => {
   if (req.body.carga && typeof req.body.carga === "object")st.extra[D].carga = { ...(st.extra[D].carga || {}), ...req.body.carga };
   await saveState(st); res.json({ ok: true });
 });
-
-// ---- Uploads varios (guía, respaldos)
 app.post("/carga/guia/:despacho", upload.single("guia"), async (req, res) => {
   try {
     const D = String(req.params.despacho);
     let url;
     if (IS_VERCEL) {
       const safe = (req.file.originalname || "guia").replace(/[^a-zA-Z0-9._-]/g, "_");
-      url = await saveBlobFile(`uploads/guias/${Date.now()}-${safe}`, req.file.buffer, req.file.mimetype || "application/octet-stream", "private");
+      url = await saveBlobFile(`uploads/guias/${Date.now()}-${safe}`, req.file.buffer, req.file.mimetype || "application/octet-stream");
     } else {
       const dst = path.join(UP_DIR, `${Date.now()}-${(req.file.originalname||"guia").replace(/[^a-zA-Z0-9._-]/g,"_")}`);
       fs.copyFileSync(req.file.path, dst);
@@ -599,7 +587,7 @@ app.post("/respaldos/upload/:despacho", upload.single("file"), async (req, res) 
     let url;
     if (IS_VERCEL) {
       const safe = (req.file.originalname || "file").replace(/[^a-zA-Z0-9._-]/g, "_");
-      url = await saveBlobFile(`uploads/respaldos/${type}/${Date.now()}-${safe}`, req.file.buffer, req.file.mimetype || "application/octet-stream", "private");
+      url = await saveBlobFile(`uploads/respaldos/${type}/${Date.now()}-${safe}`, req.file.buffer, req.file.mimetype || "application/octet-stream");
     } else {
       const dst = path.join(UP_DIR, `${Date.now()}-${(req.file.originalname||"file").replace(/[^a-zA-Z0-9._-]/g,"_")}`);
       fs.copyFileSync(req.file.path, dst);
@@ -612,13 +600,13 @@ app.post("/respaldos/upload/:despacho", upload.single("file"), async (req, res) 
   } catch (e) { console.error("Upload respaldo error", e); res.status(400).json({ ok: false }); }
 });
 
-// ---- PDFs por despacho
+// ---------- PDFs por despacho ----------
 app.post("/upload/:despacho", upload.single("pdf"), async (req, res) => {
   const { despacho } = req.params;
   let url;
   if (IS_VERCEL) {
     const safe = (req.file.originalname || "archivo.pdf").replace(/[^a-zA-Z0-9._-]/g, "_");
-    url = await saveBlobFile(`uploads/pdfs/${Date.now()}-${safe}`, req.file.buffer, "application/pdf", "private");
+    url = await saveBlobFile(`uploads/pdfs/${Date.now()}-${safe}`, req.file.buffer, "application/pdf");
   } else {
     const dst = path.join(UP_DIR, `${Date.now()}-${(req.file.originalname||"archivo.pdf").replace(/[^a-zA-Z0-9._-]/g,"_")}`);
     fs.copyFileSync(req.file.path, dst);
@@ -636,7 +624,6 @@ app.get("/pdf/view/:despacho", async (req, res) => {
   const st = await loadState();
   const p = (st.pdfs || {})[req.params.despacho];
   if (!p) return res.status(404).send("PDF no encontrado");
-  // Si es URL de Blob, redirige; si es ruta local, redirige a /uploads/...
   return res.redirect(p);
 });
 app.all("/pdf/delete/:despacho", async (req, res) => {
@@ -644,12 +631,7 @@ app.all("/pdf/delete/:despacho", async (req, res) => {
   try {
     const st = await loadState();
     const rel = (st.pdfs || {})[d];
-    if (rel) {
-      // Nota: @vercel/blob no expone delete por SDK RW pública.
-      // Para simplificar, solo removemos del índice; el GC de Blob lo puedes gestionar vía panel si quieres.
-      delete st.pdfs[d];
-      await saveState(st);
-    }
+    if (rel) { delete st.pdfs[d]; await saveState(st); }
     if (req.method === "POST" || wantsJSON(req)) return res.json({ ok: true });
     const back = req.get("referer") || "/?page=1"; return res.redirect(back);
   } catch (e) {
@@ -659,7 +641,7 @@ app.all("/pdf/delete/:despacho", async (req, res) => {
   }
 });
 
-// ---- Cargados
+// ---------- Cargados ----------
 app.get("/cargados", async (req, res) => {
   try {
     const q = (req.query.q || "").trim().toLowerCase();
@@ -754,7 +736,7 @@ app.get("/cargados", async (req, res) => {
   }
 });
 
-// ---- Provisión
+// ---------- Provisión ----------
 const PROVISION_CLIENTS = [
   "HISENSE","EECOL","PERFECT TECHNOLOGY","ICON","PUREFRUIT","COMERCIAL CYR",
   "COM. E INDUSTRIAL STROLLER SPA","TRANSP.Y COM. TRESSA","CANONTEX LIMITAD",
@@ -786,7 +768,7 @@ app.get("/provision", async (req, res) => {
   res.render("provision", { q, from, to, rows: view });
 });
 
-// ====== CONTROL EXPO ======
+// ---------- CONTROL EXPO ----------
 function toISODateOnly(s) {
   const d = parseCLDate(s); if (!d) return "";
   const y = d.getFullYear(), m = String(d.getMonth()+1).padStart(2,'0'), dd = String(d.getDate()).padStart(2,'0');
@@ -814,10 +796,10 @@ app.post("/control-expo/upload-xml", upload.single("xml"), async (req, res) => {
   try {
     if (!req.file) return res.redirect("/control-expo?err=No+se+recibio+XML");
 
-    // Persistir XML en Blob
+    // Persistir XML (PUBLIC)
     if (IS_VERCEL) {
       const filenameSafe = (req.file.originalname || "archivo.xml").replace(/[^a-zA-Z0-9._-]/g, "_");
-      await saveBlobFile(`uploads/xml/${Date.now()}-${filenameSafe}`, req.file.buffer, "application/xml", "private");
+      await saveBlobFile(`uploads/xml/${Date.now()}-${filenameSafe}`, req.file.buffer, "application/xml");
     }
 
     const xmlStr = IS_VERCEL ? req.file.buffer.toString("utf8")
@@ -871,15 +853,15 @@ app.post("/control-expo/upload-xml", upload.single("xml"), async (req, res) => {
   }
 });
 
-// Dispatcher: /upload-xml (EXPO o Listado)
+// Dispatcher /upload-xml (EXPO o Listado)
 app.post("/upload-xml", upload.single("xml"), async (req, res) => {
   try {
     if (!req.file) return res.status(400).send("Debes subir un XML");
 
-    // Persistir XML en Blob
+    // Persistir XML (PUBLIC)
     if (IS_VERCEL) {
       const filenameSafe = (req.file.originalname || "archivo.xml").replace(/[^a-zA-Z0-9._-]/g, "_");
-      await saveBlobFile(`uploads/xml/${Date.now()}-${filenameSafe}`, req.file.buffer, "application/xml", "private");
+      await saveBlobFile(`uploads/xml/${Date.now()}-${filenameSafe}`, req.file.buffer, "application/xml");
     }
 
     const xmlStr = IS_VERCEL ? req.file.buffer.toString("utf8")
@@ -942,7 +924,7 @@ app.post("/upload-xml", upload.single("xml"), async (req, res) => {
   }
 });
 
-// ---- CONTROL EXPO: Vista y clear
+// ---------- Vista / clear CONTROL EXPO ----------
 app.get("/control-expo", async (req, res) => {
   const qDespacho = String(req.query.despacho || "").toUpperCase().trim();
   const qCliente  = String(req.query.cliente  || "").toUpperCase().trim();
@@ -1016,11 +998,11 @@ app.post("/control-expo/clear", async (req, res) => {
     : res.redirect("/control-expo?ok=Datos+EXPO+limpiados");
 });
 
-// ---- Otras vistas
+// ---------- Otras vistas ----------
 app.get("/denuncias", (_, res) => res.render("denuncias"));
 app.get("/clasificacion", (_, res) => res.render("clasificacion"));
 
-// ---- Reporte Excel (se genera al vuelo; en Vercel se sirve el buffer directo)
+// ---------- Reporte Excel ----------
 app.get("/despachos/reporte/xlsx", async (req, res) => {
   const st = await loadState();
   const cache = loadCache();
@@ -1030,7 +1012,6 @@ app.get("/despachos/reporte/xlsx", async (req, res) => {
   xlsx.utils.book_append_sheet(wb, ws, "Despachos");
 
   if (IS_VERCEL) {
-    // Enviar como attachment desde memoria
     const buf = xlsx.write(wb, { type: "buffer", bookType: "xlsx" });
     res.setHeader("Content-Disposition", 'attachment; filename="despachos.xlsx"');
     res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
@@ -1042,14 +1023,14 @@ app.get("/despachos/reporte/xlsx", async (req, res) => {
   }
 });
 
-// ====== Error handler ======
+// ---------- Error handler ----------
 app.use((err, req, res, next) => {
   console.error("❌ Unhandled:", err);
   if (res.headersSent) return;
   res.status(500).send("Error en servidor: " + (err?.message || "desconocido"));
 });
 
-// ====== Start / Export ======
+// ---------- Start / Export ----------
 function listenWithRetry(startPort = parseInt(process.env.PORT || "3000", 10), maxAttempts = 10) {
   let port = startPort;
   (async () => {
@@ -1071,10 +1052,8 @@ function listenWithRetry(startPort = parseInt(process.env.PORT || "3000", 10), m
   })();
 }
 
-// En Vercel: exporta el app; en local: escucha
 if (IS_VERCEL) {
-  module.exports = app;          // @vercel/node (CJS)
-  // export default app;         // ESM
+  module.exports = app;         // para @vercel/node
 } else {
   listenWithRetry();
 }
