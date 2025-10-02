@@ -42,6 +42,21 @@ app.use((req, res, next) => {
   res.on("finish", () => console.log(`[END] ${req.method} ${req.originalUrl} ${res.statusCode} ${Date.now()-t0}ms`));
   next();
 });
+// (déjalo junto a donde defines `upload`)
+const uploadAny = IS_VERCEL
+  ? multer({ storage: multer.memoryStorage() }).any()
+  : multer({
+      storage: multer.diskStorage({
+        destination: (_, __, cb) => cb(null, UP_DIR),
+        filename: (_, file, cb) =>
+          cb(null, `${Date.now()}-${(file.originalname || "archivo").replace(/[^a-zA-Z0-9._-]/g, "_")}`),
+      }),
+    }).any();
+function pickUploadedFile(req) {
+  if (req.file) return req.file;
+  if (Array.isArray(req.files) && req.files.length) return req.files[0];
+  return null;
+}
 
 // ================== Utils ==================
 const wantsJSON = (req) => (req.get("accept")||"").toLowerCase().includes("json") || req.xhr;
@@ -309,6 +324,23 @@ app.get("/", async (req, res) => {
     fCliente, fAduana, fFrom, fTo, fPedidor, fEjecutivo
   });
 });
+app.get("/_debug/uploads", async (req, res) => {
+  try {
+    const out = await list({ prefix: "uploads/xml/" });
+    res.json({
+      ok: true,
+      count: out?.blobs?.length || 0,
+      items: (out?.blobs || []).map(b => ({
+        pathname: b.pathname,
+        size: b.size,
+        uploadedAt: b.uploadedAt,
+        url: b.url,
+      })),
+    });
+  } catch (e) {
+    res.json({ ok: false, err: e.message });
+  }
+});
 
 // ================== Flujo mínimo ==================
 function pickClienteFromRows(rows, despacho) {
@@ -481,15 +513,23 @@ app.post("/control-expo/upload-xml", upload.single("xml"), async (req, res) => {
 
 // ================== Dispatcher /upload-xml (EXPO o LISTADO) ==================
 app.post("/upload-xml", upload.single("xml"), async (req, res) => {
+  + app.post("/upload-xml", uploadAny, async (req, res) => {
   try {
     if (!req.file) return res.status(400).send("Debes subir un XML");
+    +    const f = pickUploadedFile(req);
++    if (!f) return res.status(400).send("Debes subir un XML (campo file/xml/archivo)");
++    console.log(`[UPLOAD-XML] recibido: ${f.originalname || "sin-nombre"} size=${f.size || 0}`);
     if (IS_VERCEL) {
       const filenameSafe = (req.file.originalname || "archivo.xml").replace(/[^a-zA-Z0-9._-]/g, "_");
       await saveBlobFile(`uploads/xml/${Date.now()}-${filenameSafe}`, req.file.buffer, "application/xml");
     }
     const xmlStr = IS_VERCEL ? req.file.buffer.toString("utf8") : fs.readFileSync(req.file.path, "utf8");
     const parsed0 = await parseStringPromise(xmlStr, { explicitArray:false, trim:true, mergeAttrs:true });
-
+     if (IS_VERCEL) {
++      const filenameSafe = (f.originalname || "archivo.xml").replace(/[^a-zA-Z0-9._-]/g, "_");
++      await saveBlobFile(`uploads/xml/${Date.now()}-${filenameSafe}`, f.buffer, "application/xml");
++    }
++    const xmlStr = IS_VERCEL ? f.buffer.toString("utf8") : fs.readFileSync(f.path, "utf8");
     const tipo = String(req.query.tipo || "").toLowerCase();
     const forceExpo = tipo === "expo";
     const forceListado = tipo === "listado";
@@ -617,3 +657,4 @@ if (IS_VERCEL) {
 } else {
   listenWithRetry();
 }
+
