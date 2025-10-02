@@ -763,29 +763,6 @@ app.get("/_debug/blob-cache", async (req, res) => {
     res.json({ ok: false, err: e.message });
   }
 });
-// ===== Blob helpers (PUBLIC por defecto) =====
-const { put, get } = require("@vercel/blob");
-
-async function saveBlobFile(relPath, data, contentType = "application/octet-stream", access = (process.env.BLOB_ACCESS || "public")) {
-  const { url } = await put(relPath, data, { access, contentType });
-  return url;
-}
-
-async function loadBlobJSON(relPath, fallback) {
-  try {
-    const file = await get(relPath);
-    const res = await fetch(file.url);
-    if (!res.ok) throw new Error(`GET ${relPath} ${res.status}`);
-    return await res.json();
-  } catch {
-    return fallback;
-  }
-}
-
-async function saveBlobJSON(relPath, obj, access = (process.env.BLOB_ACCESS || "public")) {
-  const body = JSON.stringify(obj, null, 2);
-  return await saveBlobFile(relPath, body, "application/json", access);
-}
 
 // ---------- Error handler ----------
 app.use((err, req, res, next) => {
@@ -821,6 +798,7 @@ if (IS_VERCEL) {
 } else {
   listenWithRetry();
 }
+
 
 
 
